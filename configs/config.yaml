@@ -1,0 +1,68 @@
+# JAVIS Configuration
+
+app:
+  name: JAVIS
+  version: "0.1.0"
+  description: "Personal AI Assistant"
+
+model:
+  # RunPod Serverless Endpoint
+  provider: runpod
+  # endpoint_id는 .env에서 로드
+
+  # 베이스 모델 정보
+  base_model: "Qwen/Qwen2.5-7B-Instruct"
+  adapter: null  # LoRA 어댑터 경로 (파인튜닝 후 설정)
+
+  # 생성 파라미터
+  generation:
+    max_tokens: 2048
+    temperature: 0.7
+    top_p: 0.9
+    stop_sequences: ["<|im_end|>", "<|endoftext|>"]
+
+conversation:
+  # 시스템 프롬프트
+  system_prompt: |
+    너는 JAVIS, 개발자를 위한 개인 AI 비서다.
+
+    핵심 원칙:
+    - 간결하고 정확하게 답변한다
+    - 필요할 때 도구를 사용한다
+    - 불확실한 것은 솔직히 말한다
+    - 한국어로 답변한다
+
+  # 대화 히스토리 최대 길이
+  max_history: 20
+
+  # 컨텍스트 윈도우
+  max_context_tokens: 8000
+
+tools:
+  enabled: false  # Phase 3에서 활성화
+  available:
+    - file_tools
+    - shell_tools
+    - web_tools
+    - system_tools
+
+memory:
+  short_term:
+    enabled: true
+    max_messages: 50
+
+  long_term:
+    enabled: false  # Phase 4에서 활성화
+    db_path: "./data/vectors"
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+
+rag:
+  enabled: false  # Phase 4에서 활성화
+  chunk_size: 500
+  chunk_overlap: 50
+  top_k: 5
+
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./logs/javis.log"

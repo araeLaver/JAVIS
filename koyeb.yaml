@@ -1,0 +1,22 @@
+name: javis
+type: web
+env:
+  - key: GROQ_API_KEY
+    secret: groq-api-key
+  - key: PORT
+    value: "8000"
+build:
+  type: buildpack
+  buildpack:
+    builder: heroku/builder:22
+run:
+  command: uvicorn javis.interfaces.api:app --host 0.0.0.0 --port 8000
+ports:
+  - port: 8000
+    protocol: http
+health_checks:
+  - type: http
+    port: 8000
+    path: /health
+regions:
+  - was

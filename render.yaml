@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: javis
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn javis.interfaces.api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false  # 수동으로 설정
+      - key: PYTHON_VERSION
+        value: "3.11"
