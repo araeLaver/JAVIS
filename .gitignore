@@ -66,3 +66,4 @@ htmlcov/
 # mypy
 .mypy_cache/
 .claude/
+models/
