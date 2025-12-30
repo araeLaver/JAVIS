@@ -1,10 +1,12 @@
-"""Model version management CLI."""
+"""Model version management CLI with auto-training support."""
 
 import argparse
 import json
 import shutil
-from pathlib import Path
+import signal
+import sys
 from datetime import datetime
+from pathlib import Path
 
 
 def list_versions(models_dir: str = "models"):
@@ -189,6 +191,170 @@ def stats(conversations_dir: str = "data/conversations"):
     print(f"{'='*40}")
 
 
+def scheduler_command(action: str):
+    """Control the training scheduler."""
+    from .scheduler import get_scheduler, start_scheduler, stop_scheduler
+
+    scheduler = get_scheduler()
+
+    if action == "start":
+        print("Starting scheduler...")
+        if start_scheduler():
+            status = scheduler.get_status()
+            print(f"Scheduler started!")
+            print(f"  Cron: {status.cron}")
+            print(f"  Timezone: {status.timezone}")
+            print(f"  Next run: {status.next_run or 'Not scheduled'}")
+
+            # Keep running until interrupted
+            print("\nPress Ctrl+C to stop...")
+
+            def signal_handler(sig, frame):
+                print("\nStopping scheduler...")
+                stop_scheduler()
+                sys.exit(0)
+
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+
+            # Block forever
+            signal.pause() if hasattr(signal, 'pause') else input()
+        else:
+            print("Failed to start scheduler. Check config and logs.")
+
+    elif action == "stop":
+        print("Stopping scheduler...")
+        if stop_scheduler():
+            print("Scheduler stopped.")
+        else:
+            print("Failed to stop scheduler.")
+
+    elif action == "status":
+        status = scheduler.get_status()
+        print(f"\n{'='*40}")
+        print("Training Scheduler Status")
+        print(f"{'='*40}")
+        print(f"Enabled: {status.enabled}")
+        print(f"Running: {status.running}")
+        print(f"Cron: {status.cron}")
+        print(f"Timezone: {status.timezone}")
+        print(f"Next run: {status.next_run or 'N/A'}")
+        print(f"Last run: {status.last_run or 'Never'}")
+        print(f"Last result: {status.last_result or 'N/A'}")
+        print(f"{'='*40}")
+
+    elif action == "trigger":
+        print("Manually triggering training...")
+        scheduler.trigger_now()
+        print("Training triggered. Check logs for progress.")
+
+    else:
+        print(f"Unknown action: {action}")
+        print("Available actions: start, stop, status, trigger")
+
+
+def train_command(provider: str = None, force: bool = False, dry_run: bool = False):
+    """Run training pipeline."""
+    from .pipeline import TrainingPipeline
+
+    print("Initializing training pipeline...")
+    pipeline = TrainingPipeline()
+
+    if dry_run:
+        # Just check conditions
+        can_train, reason = pipeline.check_conditions()
+        data_stats = pipeline.get_data_stats()
+
+        print(f"\n{'='*40}")
+        print("Training Pipeline - Dry Run")
+        print(f"{'='*40}")
+        print(f"Provider: {pipeline.config.provider}")
+        print(f"Base model: {pipeline.config.model.base_model}")
+        print(f"\nData Statistics:")
+        print(f"  Total conversations: {data_stats.total_conversations}")
+        print(f"  Good feedback: {data_stats.good_feedback}")
+        print(f"  Ready for training: {data_stats.ready_for_training}")
+        print(f"\nConditions:")
+        print(f"  Can train: {can_train}")
+        print(f"  Reason: {reason}")
+        print(f"\nTraining config:")
+        print(f"  Epochs: {pipeline.config.model.epochs}")
+        print(f"  Batch size: {pipeline.config.model.batch_size}")
+        print(f"  Learning rate: {pipeline.config.model.learning_rate}")
+        print(f"  LoRA rank: {pipeline.config.model.lora_r}")
+        print(f"{'='*40}")
+        return
+
+    print("Starting training...")
+    result = pipeline.run(force=force)
+
+    print(f"\n{'='*40}")
+    print("Training Result")
+    print(f"{'='*40}")
+
+    if result.skipped:
+        print(f"Status: SKIPPED")
+        print(f"Reason: {result.skip_reason}")
+    elif result.success:
+        print(f"Status: SUCCESS")
+        print(f"Version: {result.version}")
+        print(f"Dataset size: {result.dataset_size}")
+        print(f"Duration: {result.duration_seconds:.1f}s")
+    else:
+        print(f"Status: FAILED")
+        print(f"Error: {result.error}")
+
+    print(f"{'='*40}")
+
+
+def rollback_command(version: str = None):
+    """Rollback to a previous model version."""
+    from .version_manager import get_version_manager
+
+    vm = get_version_manager()
+    current = vm.get_active_version()
+
+    if version:
+        # Rollback to specific version
+        print(f"Rolling back to version: {version}")
+        if vm.activate_version(version):
+            print(f"Successfully rolled back from {current or 'none'} to {version}")
+        else:
+            print(f"Failed to rollback. Version {version} not found.")
+    else:
+        # Rollback to previous version
+        print("Rolling back to previous version...")
+        previous = vm.rollback()
+        if previous:
+            print(f"Successfully rolled back from {current or 'none'} to {previous}")
+        else:
+            print("No previous version to rollback to.")
+
+
+def active_command():
+    """Show currently active model version."""
+    from .version_manager import get_version_manager
+
+    vm = get_version_manager()
+    active = vm.get_active_version()
+
+    if active:
+        info = vm.get_version_info(active)
+        print(f"\n{'='*40}")
+        print("Active Model Version")
+        print(f"{'='*40}")
+        print(f"Version: {active}")
+        if info:
+            print(f"Created: {info.created_at}")
+            print(f"Base model: {info.base_model}")
+            print(f"Dataset size: {info.dataset_size}")
+        adapter_path = vm.get_active_adapter_path()
+        print(f"Adapter path: {adapter_path}")
+        print(f"{'='*40}")
+    else:
+        print("No active model version.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="JAVIS Model Management")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
@@ -210,6 +376,42 @@ def main():
     # stats command
     stats_parser = subparsers.add_parser("stats", help="Show statistics")
 
+    # scheduler command
+    scheduler_parser = subparsers.add_parser("scheduler", help="Control training scheduler")
+    scheduler_parser.add_argument(
+        "action",
+        choices=["start", "stop", "status", "trigger"],
+        help="Scheduler action"
+    )
+
+    # train command
+    train_parser = subparsers.add_parser("train", help="Run training pipeline")
+    train_parser.add_argument(
+        "--provider",
+        choices=["modal", "local"],
+        help="Training provider (default: from config)"
+    )
+    train_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip condition checks"
+    )
+    train_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without training"
+    )
+
+    # rollback command
+    rollback_parser = subparsers.add_parser("rollback", help="Rollback to previous version")
+    rollback_parser.add_argument(
+        "--version",
+        help="Specific version to rollback to"
+    )
+
+    # active command
+    active_parser = subparsers.add_parser("active", help="Show active model version")
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -220,6 +422,18 @@ def main():
         create_version(args.adapter_path, args.name)
     elif args.command == "stats":
         stats()
+    elif args.command == "scheduler":
+        scheduler_command(args.action)
+    elif args.command == "train":
+        train_command(
+            provider=args.provider,
+            force=args.force,
+            dry_run=args.dry_run
+        )
+    elif args.command == "rollback":
+        rollback_command(args.version)
+    elif args.command == "active":
+        active_command()
     else:
         parser.print_help()
 

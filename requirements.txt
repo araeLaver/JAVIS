@@ -6,3 +6,7 @@ python-dotenv>=1.0.0
 pyyaml>=6.0.1
 aiofiles>=23.2.1
 python-multipart>=0.0.6
+
+# Auto-training pipeline
+modal>=0.55.0
+apscheduler>=3.10.0

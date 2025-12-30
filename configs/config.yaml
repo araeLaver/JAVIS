@@ -66,3 +66,44 @@ logging:
   level: INFO
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   file: "./logs/javis.log"
+
+# 자동 재학습 파이프라인 설정
+training:
+  # 스케줄러 설정
+  schedule:
+    enabled: true
+    cron: "0 0 * * 0"  # 매주 일요일 자정
+    timezone: "Asia/Seoul"
+
+  # 학습 환경: modal, local
+  provider: "modal"
+
+  # 데이터 조건
+  data:
+    min_conversations: 2       # 최소 대화 수 (테스트용)
+    min_good_feedback: 0       # 최소 좋은 피드백 수 (테스트용)
+    exclude_bad_feedback: true # 나쁜 피드백 제외
+    max_age_days: 90           # 90일 이상 된 데이터 제외
+
+  # 학습 하이퍼파라미터
+  model:
+    base_model: "Qwen/Qwen2.5-7B-Instruct"
+    epochs: 1               # 테스트용 1 에폭
+    batch_size: 2           # Modal A10G용
+    learning_rate: 0.0002
+    lora_r: 64
+    lora_alpha: 16
+    max_seq_length: 1024
+    gradient_accumulation_steps: 4
+
+  # 배포 설정
+  deployment:
+    auto_deploy: true          # 학습 완료 후 자동 배포
+    validation_required: true  # 배포 전 검증 필수
+    keep_versions: 5           # 보관할 버전 수
+
+  # 알림 설정
+  notifications:
+    discord_webhook: null      # Discord 웹훅 URL
+    on_success: true
+    on_failure: true
