@@ -63,6 +63,13 @@ nul
 .coverage
 htmlcov/
 
+# Temporary test/debug scripts (root level)
+debug_*.py
+test_*.py
+run_*.py
+*_output.txt
+*_output.log
+
 # mypy
 .mypy_cache/
 .claude/
