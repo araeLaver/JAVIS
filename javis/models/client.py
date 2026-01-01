@@ -1,5 +1,8 @@
 """Groq API Client for model inference."""
 
+import json
+from typing import AsyncGenerator
+
 import httpx
 from pydantic import BaseModel
 
@@ -84,3 +87,52 @@ class ModelClient:
         import asyncio
 
         return asyncio.run(self.chat(messages))
+
+    async def chat_stream(self, messages: list[Message]) -> AsyncGenerator[str, None]:
+        """Send a streaming chat completion request.
+
+        Yields:
+            Text chunks as they arrive from the API.
+        """
+        generation_config = self.config.model.generation
+
+        payload = {
+            "model": self.model,
+            "messages": [m.model_dump() for m in messages],
+            "max_tokens": generation_config.max_tokens,
+            "temperature": generation_config.temperature,
+            "top_p": generation_config.top_p,
+            "stream": True,
+        }
+
+        if generation_config.stop_sequences:
+            payload["stop"] = generation_config.stop_sequences
+
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=60.0,
+            ) as response:
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data = line[6:]  # Remove "data: " prefix
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            delta = chunk["choices"][0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                yield content
+                        except json.JSONDecodeError:
+                            continue

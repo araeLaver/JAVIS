@@ -227,6 +227,11 @@
             40% { transform: scale(1); }
         }
 
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+
         .top-buttons {
             position: fixed;
             top: 20px;
@@ -255,6 +260,53 @@
             background: rgba(0,212,255,0.2);
             border-color: #00d4ff;
             color: #00d4ff;
+        }
+
+        .model-select {
+            padding: 8px 12px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 20px;
+            background: transparent;
+            color: #fff;
+            cursor: pointer;
+            font-size: 0.85rem;
+            outline: none;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23888' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            padding-right: 28px;
+        }
+
+        .model-select:hover {
+            border-color: rgba(255,255,255,0.4);
+        }
+
+        .model-select:focus {
+            border-color: #00d4ff;
+        }
+
+        .model-select option {
+            background: #1a1a2e;
+            color: #fff;
+        }
+
+        .model-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            background: rgba(0,212,255,0.1);
+            color: #00d4ff;
+            margin-left: 8px;
+        }
+
+        .model-indicator.modal {
+            background: rgba(123,44,191,0.2);
+            color: #b388ff;
         }
 
         .file-info {
@@ -339,6 +391,11 @@
         </header>
 
         <div class="top-buttons">
+            <select id="modelSelect" class="model-select" onchange="onModelChange()">
+                <option value="groq">Groq (빠름)</option>
+                <option value="modal">Modal (파인튜닝)</option>
+            </select>
+            <button class="top-btn" id="streamToggle" onclick="toggleStream()">Stream OFF</button>
             <button class="top-btn" id="ttsToggle" onclick="toggleTTS()">TTS OFF</button>
             <button class="top-btn" onclick="clearChat()">Clear</button>
         </div>
@@ -380,12 +437,40 @@
         const voiceBtn = document.getElementById('voiceBtn');
         const ttsToggle = document.getElementById('ttsToggle');
         const filePreview = document.getElementById('filePreview');
+        const modelSelect = document.getElementById('modelSelect');
+        const streamToggle = document.getElementById('streamToggle');
 
         // 고유 세션 ID 생성
         const sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
 
         // 설정
         let ttsEnabled = false;
+        let streamEnabled = false;
+        let selectedModel = 'groq';
+
+        function toggleStream() {
+            streamEnabled = !streamEnabled;
+            streamToggle.textContent = streamEnabled ? 'Stream ON' : 'Stream OFF';
+            streamToggle.classList.toggle('active', streamEnabled);
+        }
+
+        function onModelChange() {
+            selectedModel = modelSelect.value;
+            const modelName = selectedModel === 'groq' ? 'Groq' : 'Modal (파인튜닝 모델)';
+
+            // 모델 변경 알림 메시지 추가
+            const infoDiv = document.createElement('div');
+            infoDiv.className = 'message assistant';
+            infoDiv.innerHTML = `
+                <div class="avatar">J</div>
+                <div class="content" style="background: rgba(0,212,255,0.1); font-size: 0.9rem;">
+                    ℹ️ 모델이 <strong>${modelName}</strong>으로 변경되었습니다.
+                    ${selectedModel === 'modal' ? '<br><small style="color: #888;">첫 요청은 콜드 스타트로 1-2분 소요될 수 있습니다.</small>' : ''}
+                </div>
+            `;
+            chatContainer.appendChild(infoDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
         let isRecording = false;
         let recognition = null;
         let selectedFiles = [];
@@ -486,7 +571,7 @@
             updateFilePreview();
         }
 
-        function addMessage(content, isUser, files = []) {
+        function addMessage(content, isUser, files = [], modelUsed = null) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
 
@@ -502,10 +587,13 @@
                 html = files.map(f => `<div class="file-info">📄 ${f}</div>`).join('') + html;
             }
 
-            // 어시스턴트 응답에 피드백 버튼 추가
+            // 어시스턴트 응답에 피드백 버튼 및 모델 표시
             if (!isUser) {
+                const modelLabel = modelUsed === 'modal' ? 'Modal' : 'Groq';
+                const modelClass = modelUsed === 'modal' ? 'modal' : '';
                 html += `
                     <div class="feedback-btns">
+                        <span class="model-indicator ${modelClass}">${modelLabel}</span>
                         <button class="feedback-btn good" onclick="sendFeedback('good', this)">👍 좋아요</button>
                         <button class="feedback-btn bad" onclick="sendFeedback('bad', this)">👎 별로</button>
                     </div>
@@ -552,6 +640,7 @@
             const loadingDiv = document.createElement('div');
             loadingDiv.className = 'message assistant';
             loadingDiv.id = 'loadingMessage';
+            const modelLabel = selectedModel === 'modal' ? 'Modal GPU' : 'Groq';
             loadingDiv.innerHTML = `
                 <div class="avatar">J</div>
                 <div class="content">
@@ -560,6 +649,7 @@
                         <span></span>
                         <span></span>
                     </div>
+                    <small style="color: #888; font-size: 0.75rem;">${modelLabel} 응답 생성 중...</small>
                 </div>
             `;
             chatContainer.appendChild(loadingDiv);
@@ -608,28 +698,35 @@
                     updateFilePreview();
                 }
 
-                const response = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        message: finalMessage,
-                        session_id: sessionId
-                    }),
-                });
+                // 스트리밍 모드 (Groq만 지원)
+                if (streamEnabled && selectedModel === 'groq') {
+                    await sendStreamingMessage(finalMessage);
+                } else {
+                    // 일반 요청
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            message: finalMessage,
+                            session_id: sessionId,
+                            model: selectedModel
+                        }),
+                    });
 
-                hideLoading();
+                    hideLoading();
 
-                if (!response.ok) {
-                    throw new Error('API request failed');
+                    if (!response.ok) {
+                        throw new Error('API request failed');
+                    }
+
+                    const data = await response.json();
+                    addMessage(data.response, false, [], selectedModel);
+
+                    // TTS로 응답 읽기
+                    speak(data.response);
                 }
-
-                const data = await response.json();
-                addMessage(data.response, false);
-
-                // TTS로 응답 읽기
-                speak(data.response);
 
             } catch (error) {
                 hideLoading();
@@ -637,6 +734,99 @@
             } finally {
                 sendButton.disabled = false;
                 messageInput.focus();
+            }
+        }
+
+        async function sendStreamingMessage(message) {
+            /**
+             * Send message with streaming response (SSE).
+             */
+            hideLoading();
+
+            // 스트리밍 메시지 컨테이너 생성
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message assistant';
+            messageDiv.innerHTML = `
+                <div class="avatar">J</div>
+                <div class="content">
+                    <span class="streaming-content"></span>
+                    <span class="cursor" style="animation: blink 1s infinite;">▌</span>
+                </div>
+            `;
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+
+            const contentSpan = messageDiv.querySelector('.streaming-content');
+            const cursorSpan = messageDiv.querySelector('.cursor');
+            let fullResponse = '';
+
+            try {
+                const response = await fetch('/api/chat/stream', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: sessionId,
+                        model: selectedModel
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error('Streaming request failed');
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value);
+                    const lines = chunk.split('\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                if (data.content) {
+                                    fullResponse += data.content;
+                                    contentSpan.innerHTML = formatMessage(fullResponse);
+                                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                                }
+                                if (data.done) {
+                                    break;
+                                }
+                                if (data.error) {
+                                    contentSpan.innerHTML = `오류: ${data.error}`;
+                                    break;
+                                }
+                            } catch (e) {
+                                // JSON 파싱 오류 무시
+                            }
+                        }
+                    }
+                }
+
+                // 스트리밍 완료 - 커서 제거, 피드백 버튼 추가
+                cursorSpan.remove();
+                const contentDiv = messageDiv.querySelector('.content');
+                contentDiv.innerHTML = formatMessage(fullResponse) + `
+                    <div class="feedback-btns">
+                        <span class="model-indicator">Groq</span>
+                        <button class="feedback-btn good" onclick="sendFeedback('good', this)">👍 좋아요</button>
+                        <button class="feedback-btn bad" onclick="sendFeedback('bad', this)">👎 별로</button>
+                    </div>
+                `;
+
+                // TTS로 응답 읽기
+                speak(fullResponse);
+
+            } catch (error) {
+                cursorSpan.remove();
+                contentSpan.innerHTML = `오류: ${error.message}`;
             }
         }
 

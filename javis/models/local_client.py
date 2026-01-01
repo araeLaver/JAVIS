@@ -1,11 +1,8 @@
 """Local model client for fine-tuned JAVIS model."""
 
-import torch
 from pathlib import Path
 from typing import Optional
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import PeftModel
 from pydantic import BaseModel
 
 from javis.utils.config import get_config
@@ -46,6 +43,11 @@ class LocalModelClient:
         """Load model and tokenizer."""
         if self._loaded:
             return
+
+        # Lazy imports for heavy dependencies
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from peft import PeftModel
 
         print(f"Loading model: {self.base_model_name}")
 
@@ -88,6 +90,8 @@ class LocalModelClient:
 
     def chat(self, messages: list[Message]) -> ChatResponse:
         """Generate chat response."""
+        import torch
+
         if not self._loaded:
             self.load()
 

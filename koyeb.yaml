@@ -3,6 +3,12 @@ type: web
 env:
   - key: GROQ_API_KEY
     secret: groq-api-key
+  - key: MODAL_TOKEN_ID
+    secret: modal-token-id
+  - key: MODAL_TOKEN_SECRET
+    secret: modal-token-secret
+  - key: DISCORD_WEBHOOK_URL
+    secret: discord-webhook-url
   - key: PORT
     value: "8000"
 build:
