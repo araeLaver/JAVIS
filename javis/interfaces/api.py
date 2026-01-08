@@ -32,6 +32,8 @@ from javis.training.scheduler import (
     stop_scheduler,
     SCHEDULER_AVAILABLE,
 )
+from javis.core.engine import ChatEngine
+from javis.tools import initialize_tools
 
 # 업로드 디렉토리
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads"
@@ -55,6 +57,7 @@ class ChatRequest(BaseModel):
     session_id: str = "default"
     model: str = "groq"  # "groq", "local", "modal"
     adapter_version: Optional[str] = None  # 특정 어댑터 버전 지정 (local/modal용)
+    use_tools: bool = False  # 도구 사용 여부
 
 
 class ChatResponse(BaseModel):
@@ -62,19 +65,26 @@ class ChatResponse(BaseModel):
     response: str
     session_id: str
     model_used: str = "groq"  # "groq" or "local"
+    tools_used: bool = False  # 도구 사용 여부
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    import logging
+    logger = logging.getLogger(__name__)
+
     # Startup
     load_config()
+    config = get_config()
+
+    # Initialize tools if enabled
+    if config.tools.enabled:
+        initialize_tools(config.tools.available)
+        logger.info(f"Tools initialized: {config.tools.available}")
 
     # Auto-start scheduler if enabled in config
-    config = get_config()
     if config.training.schedule.enabled and SCHEDULER_AVAILABLE:
-        import logging
-        logger = logging.getLogger(__name__)
         if start_scheduler():
             scheduler = get_scheduler()
             logger.info(f"Training scheduler started. Next run: {scheduler.get_next_run_time()}")
@@ -240,8 +250,18 @@ async def chat(request: ChatRequest):
                     status_code=500,
                     detail="Groq API key not configured"
                 )
-            client = ModelClient()
-            response = await client.chat(messages)
+
+            tools_used = False
+
+            # 도구 사용 요청 시 ChatEngine 사용
+            if request.use_tools and config.tools.enabled:
+                engine = ChatEngine()
+                response = await engine.chat_with_tools(messages)
+                tools_used = True
+            else:
+                client = ModelClient()
+                response = await client.chat(messages)
+
             model_used = "groq"
 
         # 어시스턴트 응답 추가
@@ -258,7 +278,8 @@ async def chat(request: ChatRequest):
         return ChatResponse(
             response=response.content,
             session_id=request.session_id,
-            model_used=model_used
+            model_used=model_used,
+            tools_used=tools_used if request.model == "groq" else False
         )
 
     except HTTPException:
@@ -336,12 +357,37 @@ async def chat_stream(request: ChatRequest):
 async def clear_session(session_id: str = "default"):
     """Clear a chat session and save conversation log."""
     logger = get_logger()
+    config = get_config()
+    memory_saved = False
+
+    # Save to long-term memory if enabled
+    if session_id in sessions and config.memory.long_term.enabled:
+        try:
+            from javis.memory import get_memory_manager
+            memory_manager = get_memory_manager()
+            messages = sessions[session_id]
+
+            # Convert Message objects to dict for memory storage
+            turns = [
+                {"role": m.role, "content": m.content}
+                for m in messages
+                if m.role != "system"  # Exclude system message
+            ]
+
+            if len(turns) >= 2:  # At least one exchange
+                result = await memory_manager.store_conversation(
+                    session_id=session_id,
+                    turns=turns
+                )
+                memory_saved = result is not None
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to save to memory: {e}")
 
     # 대화 저장 후 종료
     filepath = logger.end_conversation(session_id)
 
     if session_id in sessions:
-        config = get_config()
         sessions[session_id] = [
             Message(role="system", content=config.conversation.system_prompt)
         ]
@@ -349,7 +395,8 @@ async def clear_session(session_id: str = "default"):
     return {
         "status": "cleared",
         "session_id": session_id,
-        "saved_to": str(filepath) if filepath else None
+        "saved_to": str(filepath) if filepath else None,
+        "memory_saved": memory_saved
     }
 
 
@@ -570,6 +617,309 @@ async def trigger_training():
             "skip_reason": result.skip_reason,
             "version": result.version,
             "error": result.error,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Tools API ====================
+
+@app.get("/api/tools")
+async def get_tools_info():
+    """Get information about available tools."""
+    from javis.tools import get_tools_info
+    config = get_config()
+
+    if not config.tools.enabled:
+        return {
+            "enabled": False,
+            "message": "Tools are disabled in config",
+        }
+
+    info = get_tools_info()
+    return {
+        "enabled": True,
+        "registered_tools": info["registered_tools"],
+        "enabled_tools": info["enabled_tools"],
+        "enabled_categories": info["enabled_categories"],
+    }
+
+
+# ==================== Memory API ====================
+
+class MemorySearchRequest(BaseModel):
+    """Memory search request."""
+    query: str
+    limit: int = 5
+    min_score: float = 0.3
+
+
+@app.get("/api/memory/stats")
+async def get_memory_stats():
+    """Get memory system statistics."""
+    config = get_config()
+
+    if not config.memory.long_term.enabled:
+        return {
+            "enabled": False,
+            "message": "Long-term memory is disabled in config",
+        }
+
+    try:
+        from javis.memory import get_memory_manager
+        manager = get_memory_manager()
+        stats = await manager.get_stats()
+
+        return {
+            "enabled": True,
+            "count": stats["count"],
+            "db_path": stats["db_path"],
+            "collection": stats["collection"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/memory/search")
+async def search_memory(request: MemorySearchRequest):
+    """Search memories."""
+    config = get_config()
+
+    if not config.memory.long_term.enabled:
+        raise HTTPException(status_code=400, detail="Memory system is disabled")
+
+    try:
+        from javis.memory import get_memory_manager
+        manager = get_memory_manager()
+        results = await manager.search_memories(
+            request.query,
+            limit=request.limit,
+            min_score=request.min_score
+        )
+
+        return {
+            "query": request.query,
+            "count": len(results),
+            "results": [
+                {
+                    "id": r.entry.id,
+                    "session_id": r.entry.session_id,
+                    "summary": r.entry.summary,
+                    "topics": r.entry.topics,
+                    "score": r.score,
+                    "created_at": r.entry.created_at.isoformat(),
+                }
+                for r in results
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/memory/{memory_id}")
+async def delete_memory(memory_id: str):
+    """Delete a memory entry."""
+    config = get_config()
+
+    if not config.memory.long_term.enabled:
+        raise HTTPException(status_code=400, detail="Memory system is disabled")
+
+    try:
+        from javis.memory import get_memory_manager
+        manager = get_memory_manager()
+        success = await manager.delete_memory(memory_id)
+
+        if success:
+            return {"status": "deleted", "id": memory_id}
+        else:
+            raise HTTPException(status_code=404, detail="Memory not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== RAG API ====================
+
+class RAGAddDocumentRequest(BaseModel):
+    """Request to add a document to RAG."""
+    source_type: str  # file, web, code
+    source_path: str
+
+
+class RAGSearchRequest(BaseModel):
+    """RAG search request."""
+    query: str
+    top_k: int = 5
+    min_score: float = 0.3
+
+
+@app.get("/api/rag/stats")
+async def get_rag_stats():
+    """Get RAG system statistics."""
+    config = get_config()
+
+    if not config.rag.enabled:
+        return {
+            "enabled": False,
+            "message": "RAG system is disabled in config",
+        }
+
+    try:
+        from javis.rag import get_rag_manager
+        manager = get_rag_manager()
+        stats = await manager.get_stats()
+
+        return {
+            "enabled": True,
+            "total_documents": stats.total_documents,
+            "total_chunks": stats.total_chunks,
+            "by_source": stats.by_source,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rag/documents")
+async def add_rag_document(request: RAGAddDocumentRequest):
+    """Add a document to RAG system."""
+    config = get_config()
+
+    if not config.rag.enabled:
+        raise HTTPException(status_code=400, detail="RAG system is disabled")
+
+    try:
+        from javis.rag import get_rag_manager
+        manager = get_rag_manager()
+
+        document = await manager.add_document(
+            source_type=request.source_type,
+            source_path=request.source_path
+        )
+
+        if document:
+            return {
+                "status": "added",
+                "document": {
+                    "id": document.id,
+                    "title": document.title,
+                    "source": document.source.value,
+                    "source_path": document.source_path,
+                },
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to add document")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rag/documents")
+async def list_rag_documents(limit: int = 100, offset: int = 0):
+    """List documents in RAG system."""
+    config = get_config()
+
+    if not config.rag.enabled:
+        raise HTTPException(status_code=400, detail="RAG system is disabled")
+
+    try:
+        from javis.rag import get_rag_manager
+        manager = get_rag_manager()
+        documents = await manager.list_documents(limit=limit, offset=offset)
+
+        return {
+            "count": len(documents),
+            "documents": documents,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rag/search")
+async def search_rag(request: RAGSearchRequest):
+    """Search RAG documents."""
+    config = get_config()
+
+    if not config.rag.enabled:
+        raise HTTPException(status_code=400, detail="RAG system is disabled")
+
+    try:
+        from javis.rag import get_rag_manager
+        manager = get_rag_manager()
+
+        results = await manager.search(
+            request.query,
+            top_k=request.top_k,
+            min_score=request.min_score
+        )
+
+        return {
+            "query": request.query,
+            "count": len(results),
+            "results": [
+                {
+                    "chunk_id": r.chunk.id,
+                    "document_id": r.chunk.document_id,
+                    "content": r.chunk.content,
+                    "score": r.score,
+                    "document_title": r.document.title if r.document else None,
+                    "source_path": r.document.source_path if r.document else None,
+                }
+                for r in results
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/rag/documents/{document_id}")
+async def delete_rag_document(document_id: str):
+    """Delete a document from RAG system."""
+    config = get_config()
+
+    if not config.rag.enabled:
+        raise HTTPException(status_code=400, detail="RAG system is disabled")
+
+    try:
+        from javis.rag import get_rag_manager
+        manager = get_rag_manager()
+        success = await manager.delete_document(document_id)
+
+        if success:
+            return {"status": "deleted", "id": document_id}
+        else:
+            raise HTTPException(status_code=404, detail="Document not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rag/codebase")
+async def add_codebase(directory: str, max_files: int = 100):
+    """Add a codebase directory to RAG system."""
+    config = get_config()
+
+    if not config.rag.enabled:
+        raise HTTPException(status_code=400, detail="RAG system is disabled")
+
+    try:
+        from javis.rag import get_rag_manager
+        manager = get_rag_manager()
+
+        documents = await manager.add_codebase(
+            directory=directory,
+            max_files=max_files
+        )
+
+        return {
+            "status": "added",
+            "count": len(documents),
+            "documents": [
+                {"id": d.id, "title": d.title}
+                for d in documents
+            ],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

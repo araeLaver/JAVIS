@@ -82,6 +82,42 @@ class TrainingNotificationsConfig(BaseModel):
     on_failure: bool = True
 
 
+class ToolsConfig(BaseModel):
+    """Tools system configuration."""
+
+    enabled: bool = False
+    available: list[str] = ["file_tools", "web_tools", "system_tools"]
+
+
+class LongTermMemoryConfig(BaseModel):
+    """Long-term memory configuration."""
+
+    enabled: bool = False
+    db_path: str = "./data/vectors/memory"
+    collection_name: str = "javis_memory"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    summarize_after_turns: int = 10  # Auto-summarize after N turns
+
+
+class MemoryConfig(BaseModel):
+    """Memory system configuration."""
+
+    long_term: LongTermMemoryConfig = LongTermMemoryConfig()
+
+
+class RAGConfig(BaseModel):
+    """RAG system configuration."""
+
+    enabled: bool = False
+    db_path: str = "./data/vectors/documents"
+    collection_name: str = "javis_documents"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    chunk_size: int = 500
+    chunk_overlap: int = 50
+    top_k: int = 5
+    min_relevance_score: float = 0.3
+
+
 class TrainingConfig(BaseModel):
     """Complete training pipeline configuration."""
 
@@ -107,6 +143,9 @@ class Config(BaseModel):
     model: ModelConfig = ModelConfig()
     conversation: ConversationConfig = ConversationConfig()
     training: TrainingConfig = TrainingConfig()
+    tools: ToolsConfig = ToolsConfig()
+    memory: MemoryConfig = MemoryConfig()
+    rag: RAGConfig = RAGConfig()
 
     # Environment variables (loaded separately)
     groq_api_key: str | None = None
@@ -151,12 +190,29 @@ def load_config(config_path: str | Path | None = None) -> Config:
         notifications=TrainingNotificationsConfig(**training_data.get("notifications", {})),
     )
 
+    # Parse tools config if present
+    tools_data = config_data.get("tools", {})
+    tools_config = ToolsConfig(**tools_data)
+
+    # Parse memory config if present
+    memory_data = config_data.get("memory", {})
+    memory_config = MemoryConfig(
+        long_term=LongTermMemoryConfig(**memory_data.get("long_term", {}))
+    )
+
+    # Parse RAG config if present
+    rag_data = config_data.get("rag", {})
+    rag_config = RAGConfig(**rag_data)
+
     # Create config object
     _config = Config(
         app=AppConfig(**config_data.get("app", {})),
         model=ModelConfig(**config_data.get("model", {})),
         conversation=ConversationConfig(**config_data.get("conversation", {})),
         training=training_config,
+        tools=tools_config,
+        memory=memory_config,
+        rag=rag_config,
         groq_api_key=os.getenv("GROQ_API_KEY"),
         runpod_api_key=os.getenv("RUNPOD_API_KEY"),
         runpod_endpoint_id=os.getenv("RUNPOD_ENDPOINT_ID"),

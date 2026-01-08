@@ -39,28 +39,30 @@ conversation:
   max_context_tokens: 8000
 
 tools:
-  enabled: false  # Phase 3에서 활성화
+  enabled: true  # Phase 3 활성화됨
   available:
     - file_tools
-    - shell_tools
     - web_tools
     - system_tools
 
+# Phase 4: Memory & RAG System
 memory:
-  short_term:
-    enabled: true
-    max_messages: 50
-
   long_term:
-    enabled: false  # Phase 4에서 활성화
-    db_path: "./data/vectors"
+    enabled: true
+    db_path: "./data/vectors/memory"
+    collection_name: "javis_memory"
     embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    summarize_after_turns: 10
 
 rag:
-  enabled: false  # Phase 4에서 활성화
+  enabled: true
+  db_path: "./data/vectors/documents"
+  collection_name: "javis_documents"
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
   chunk_size: 500
   chunk_overlap: 50
   top_k: 5
+  min_relevance_score: 0.3
 
 logging:
   level: INFO

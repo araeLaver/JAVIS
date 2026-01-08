@@ -10,3 +10,9 @@ python-multipart>=0.0.6
 # Auto-training pipeline
 modal>=0.55.0
 apscheduler>=3.10.0
+
+# Phase 4: Memory & RAG
+chromadb>=0.4.22
+sentence-transformers>=2.2.2
+beautifulsoup4>=4.12.2
+lxml>=5.1.0
