@@ -1,0 +1,52 @@
+# Daily Summary Workflow
+# 매일 아침 시스템 상태를 요약하여 Discord로 알림
+
+name: daily_summary
+description: "매일 시스템 상태 요약 알림"
+enabled: true
+
+trigger:
+  type: cron
+  cron: "0 9 * * *"  # 매일 오전 9시
+  timezone: "Asia/Seoul"
+
+steps:
+  - name: get_datetime
+    action: get_datetime
+    params:
+      timezone: "Asia/Seoul"
+      format: "%Y년 %m월 %d일 %H:%M"
+
+  - name: get_system_info
+    action: system_info
+
+  - name: set_summary
+    action: set_variable
+    params:
+      name: summary
+      value: |
+        **JAVIS 일일 리포트**
+
+        시간: {{ steps.get_datetime.output }}
+
+        **시스템 상태**
+        - CPU: {{ steps.get_system_info.output.cpu_percent }}%
+        - 메모리: {{ steps.get_system_info.output.memory.percent }}%
+        - 디스크: {{ steps.get_system_info.output.disk.percent }}%
+
+  - name: send_notification
+    action: notify
+    params:
+      message: "{{ variables.summary }}"
+      channel: discord
+
+on_success:
+  notify: false  # 이미 step에서 알림을 보냄
+
+on_failure:
+  notify: true
+  message: "일일 리포트 생성 실패: {{ error }}"
+
+tags:
+  - daily
+  - monitoring

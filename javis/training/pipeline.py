@@ -10,8 +10,11 @@ from pydantic import BaseModel
 
 from javis.utils.config import TrainingConfig, get_config
 
+from .ab_testing import ABTestManager, get_ab_test_manager
+from .data_quality import DataQualityScorer, get_quality_scorer
 from .notifications import NotificationService, get_notifier
 from .remote import RemoteTrainer, TrainingResult
+from .validation import ModelValidator, get_validator
 from .version_manager import VersionManager, get_version_manager
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,8 @@ class DataStats(BaseModel):
     bad_feedback: int = 0
     no_feedback: int = 0
     ready_for_training: int = 0
+    high_quality: int = 0  # Conversations meeting quality threshold
+    avg_quality_score: float = 0.0
 
 
 class TrainingPipeline:
@@ -60,10 +65,15 @@ class TrainingPipeline:
         self.remote_trainer = RemoteTrainer(config.provider)
         self.version_manager = get_version_manager()
         self.notifier = get_notifier()
+        self.quality_scorer = get_quality_scorer()
+        self.model_validator = get_validator()
+        self.ab_test_manager = get_ab_test_manager()
 
     def get_data_stats(self) -> DataStats:
         """Get statistics about available training data."""
         stats = DataStats()
+        quality_scores: list[float] = []
+        min_quality = self.config.data_quality.min_score
 
         if not self.conversations_dir.exists():
             return stats
@@ -87,6 +97,13 @@ class TrainingPipeline:
                 else:
                     stats.no_feedback += 1
 
+                # Calculate quality score
+                quality = self.quality_scorer.score_conversation(conv)
+                quality_scores.append(quality.overall_score)
+
+                if quality.overall_score >= min_quality:
+                    stats.high_quality += 1
+
             except (json.JSONDecodeError, IOError):
                 continue
 
@@ -95,6 +112,12 @@ class TrainingPipeline:
             stats.ready_for_training = stats.good_feedback + stats.no_feedback
         else:
             stats.ready_for_training = stats.total_conversations
+
+        # Calculate average quality score
+        if quality_scores:
+            stats.avg_quality_score = round(
+                sum(quality_scores) / len(quality_scores), 2
+            )
 
         return stats
 
@@ -122,11 +145,16 @@ class TrainingPipeline:
 
         return True, "All conditions met"
 
-    def export_training_data(self, output_path: Optional[Path] = None) -> Path:
+    def export_training_data(
+        self,
+        output_path: Optional[Path] = None,
+        use_quality_filter: bool = True,
+    ) -> Path:
         """Export conversations to JSONL format for training.
 
         Args:
             output_path: Output file path (default: auto-generated)
+            use_quality_filter: Apply quality score filtering
 
         Returns:
             Path to the exported JSONL file
@@ -145,6 +173,9 @@ class TrainingPipeline:
         cutoff_date = None
         if self.config.data.max_age_days > 0:
             cutoff_date = datetime.now() - timedelta(days=self.config.data.max_age_days)
+
+        min_quality = self.config.data_quality.min_score
+        filtered_by_quality = 0
 
         for json_file in self.conversations_dir.rglob("*.json"):
             try:
@@ -173,6 +204,13 @@ class TrainingPipeline:
                         except ValueError:
                             pass
 
+                # Quality filter
+                if use_quality_filter:
+                    quality = self.quality_scorer.score_conversation(conv)
+                    if quality.overall_score < min_quality:
+                        filtered_by_quality += 1
+                        continue
+
                 # Extract messages
                 messages = []
                 for turn in conv.get("turns", []):
@@ -191,14 +229,20 @@ class TrainingPipeline:
             for conv in conversations:
                 f.write(json.dumps(conv, ensure_ascii=False) + "\n")
 
-        logger.info(f"Exported {len(conversations)} conversations to {output_path}")
+        logger.info(
+            f"Exported {len(conversations)} conversations to {output_path} "
+            f"(filtered {filtered_by_quality} by quality)"
+        )
         return output_path
 
-    def validate_model(self, adapter_path: Path) -> bool:
+    def validate_model(
+        self, adapter_path: Path, version: Optional[str] = None
+    ) -> bool:
         """Validate the trained model with test prompts.
 
         Args:
             adapter_path: Path to the adapter directory
+            version: Version string for logging
 
         Returns:
             True if validation passes
@@ -206,17 +250,33 @@ class TrainingPipeline:
         if not self.config.deployment.validation_required:
             return True
 
-        # Check adapter files exist
-        required_files = ["adapter_config.json"]
-        for f in required_files:
-            if not (adapter_path / f).exists():
-                logger.error(f"Missing required file: {f}")
-                return False
+        # Use enhanced ModelValidator
+        use_inference = self.config.validation.inference_enabled
 
-        # TODO: Add actual model loading and inference validation
-        # For now, just check files exist
-        logger.info("Model validation passed (file check only)")
-        return True
+        if use_inference:
+            # Full validation with inference testing
+            logger.info("Running model validation with inference testing...")
+            result = self.model_validator.validate_with_inference(
+                adapter_path=adapter_path,
+                base_model=self.config.model.base_model,
+            )
+        else:
+            # File check only
+            logger.info("Running model validation (file check only)...")
+            result = self.model_validator.validate_files_only(adapter_path)
+
+        if result.passed:
+            logger.info(
+                f"Model validation passed: {result.passed_tests}/{result.total_tests} tests "
+                f"(score: {result.quality_score:.2f})"
+            )
+            return True
+        else:
+            logger.error(f"Model validation failed: {result.error_message}")
+            for test in result.test_results:
+                if not test.get("passed", False):
+                    logger.error(f"  - Failed: {test.get('name', 'unknown')}")
+            return False
 
     def run(self, force: bool = False) -> PipelineResult:
         """Execute the full training pipeline.
@@ -284,7 +344,9 @@ class TrainingPipeline:
 
             # Phase 4: Validate model
             logger.info("Validating trained model...")
-            if result.adapter_path and not self.validate_model(result.adapter_path):
+            if result.adapter_path and not self.validate_model(
+                result.adapter_path, result.version
+            ):
                 logger.error("Model validation failed")
                 self.version_manager.mark_failed(result.version)
                 self.notifier.notify_failure("Model validation failed", {
@@ -308,8 +370,23 @@ class TrainingPipeline:
                     result.adapter_path, metadata, result.version
                 )
 
-            # Phase 6: Deploy if auto_deploy enabled
-            if self.config.deployment.auto_deploy:
+            # Phase 6: Deploy or A/B test
+            ab_test_id = None
+            current_version = self.version_manager.get_active_version()
+
+            if self.config.ab_testing.auto_create and current_version:
+                # Create A/B test between current and new version
+                logger.info(
+                    f"Creating A/B test: {current_version.version} vs {result.version}"
+                )
+                ab_test_id = self.ab_test_manager.create_test(
+                    version_a=current_version.version,
+                    version_b=result.version,
+                    description=f"Auto-created: comparing {current_version.version} with {result.version}",
+                )
+                logger.info(f"A/B test created: {ab_test_id}")
+
+            elif self.config.deployment.auto_deploy:
                 logger.info(f"Activating version {result.version}...")
                 self.version_manager.activate_version(result.version)
 
@@ -324,11 +401,17 @@ class TrainingPipeline:
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
 
-            self.notifier.notify_success(result.version, {
+            notify_metadata = {
                 "dataset_size": dataset_size,
                 "duration_seconds": duration,
-                "auto_deployed": self.config.deployment.auto_deploy,
-            })
+                "auto_deployed": self.config.deployment.auto_deploy
+                and not ab_test_id,
+            }
+            if ab_test_id:
+                notify_metadata["ab_test_id"] = ab_test_id
+                notify_metadata["ab_test_enabled"] = True
+
+            self.notifier.notify_success(result.version, notify_metadata)
 
             logger.info(f"Pipeline complete: version {result.version}")
             return PipelineResult(

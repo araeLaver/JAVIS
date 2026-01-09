@@ -28,7 +28,7 @@ __all__ = [
 
 def get_available_categories() -> list[str]:
     """사용 가능한 도구 카테고리 목록."""
-    return ["file_tools", "web_tools", "system_tools"]
+    return ["file_tools", "web_tools", "system_tools", "calendar_tools", "notion_tools", "slack_tools"]
 
 
 def initialize_tools(categories: Optional[list[str]] = None) -> None:
@@ -54,6 +54,21 @@ def initialize_tools(categories: Optional[list[str]] = None) -> None:
         from javis.tools.system_tools import register_system_tools
         register_system_tools()
         registry.enable_category("system_tools")
+
+    if "calendar_tools" in categories:
+        from javis.tools.calendar_tools import register_calendar_tools
+        register_calendar_tools()
+        registry.enable_category("calendar_tools")
+
+    if "notion_tools" in categories:
+        from javis.tools.notion_tools import register_notion_tools
+        register_notion_tools()
+        registry.enable_category("notion_tools")
+
+    if "slack_tools" in categories:
+        from javis.tools.slack_tools import register_slack_tools
+        register_slack_tools()
+        registry.enable_category("slack_tools")
 
     logger.info(f"Tool initialization complete: {len(registry.get_enabled_tools())} tools enabled")
 

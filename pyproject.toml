@@ -54,6 +54,13 @@ training = [
     "trl>=0.7.0",
 ]
 
+voice = [
+    "edge-tts>=6.1.9",       # TTS (Microsoft Edge Neural Voices)
+    "sounddevice>=0.4.6",    # Microphone recording
+    "soundfile>=0.12.1",     # Audio file processing
+    "pygame>=2.5.0",         # Audio playback
+]
+
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",

@@ -44,6 +44,9 @@ tools:
     - file_tools
     - web_tools
     - system_tools
+    - calendar_tools    # Phase 7
+    - notion_tools      # Phase 7
+    - slack_tools       # Phase 7
 
 # Phase 4: Memory & RAG System
 memory:
@@ -109,3 +112,81 @@ training:
     discord_webhook: null      # Discord 웹훅 URL
     on_success: true
     on_failure: true
+
+  # Phase 5: 데이터 품질 설정
+  data_quality:
+    enabled: true
+    min_score_for_training: 3.5  # 학습에 사용할 최소 품질 점수
+    weights:
+      feedback: 0.4
+      length: 0.2
+      coherence: 0.2
+      recency: 0.2
+
+  # Phase 5: 모델 검증 설정
+  validation:
+    enabled: true
+    prompts_path: "./configs/validation_prompts.json"
+    max_failures: 2              # 최대 허용 실패 수
+    required_pass_rate: 0.8      # 필요한 통과율
+
+  # Phase 5: 성능 메트릭 설정
+  metrics:
+    enabled: true
+    retention_days: 90           # 메트릭 보관 기간
+    aggregation_interval: "daily"
+
+  # Phase 5: A/B 테스팅 설정
+  ab_testing:
+    enabled: false               # 기본적으로 비활성화
+    default_traffic_split: 0.5   # 새 버전에 보낼 트래픽 비율
+    min_sample_size: 100         # 최소 샘플 크기
+    significance_threshold: 0.95 # 통계적 유의성 임계값
+
+# Phase 6: 음성 인터페이스 설정
+voice:
+  enabled: true
+  language: "ko-KR"
+
+  # STT (Speech-to-Text) 설정
+  stt:
+    provider: "groq_whisper"  # groq_whisper
+    groq_whisper:
+      model: "whisper-large-v3"
+    recording:
+      sample_rate: 16000
+      silence_threshold: 500   # ms
+      max_duration: 30         # seconds
+
+  # TTS (Text-to-Speech) 설정
+  tts:
+    provider: "edge_tts"  # edge_tts
+    edge_tts:
+      voice: "ko-KR-SunHiNeural"  # 여성 음성 (ko-KR-InJoonNeural: 남성)
+      rate: "+0%"
+      pitch: "+0Hz"
+    playback:
+      auto_play: true
+
+# Phase 6-2: 워크플로우 자동화 설정
+workflows:
+  enabled: true
+  directory: "./configs/workflows"
+  max_concurrent: 3
+  default_timeout: 300  # 5분
+  notifications:
+    on_success: true
+    on_failure: true
+
+# Phase 7: 외부 서비스 연동
+integrations:
+  google_calendar:
+    enabled: false  # GOOGLE_CREDENTIALS_PATH 환경변수 필요
+    calendar_id: "primary"
+    max_results: 10
+  notion:
+    enabled: false  # NOTION_API_KEY 환경변수 필요
+    default_database_id: null
+  slack:
+    enabled: false  # SLACK_BOT_TOKEN 환경변수 필요
+    default_channel: "#general"

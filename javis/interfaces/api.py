@@ -925,6 +925,943 @@ async def add_codebase(directory: str, max_files: int = 100):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== Phase 5: Data Quality API ====================
+
+@app.get("/api/training/quality/stats")
+async def get_quality_stats():
+    """Get data quality statistics."""
+    try:
+        from javis.training.data_quality import get_quality_scorer
+        scorer = get_quality_scorer()
+        stats = scorer.get_statistics()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/training/quality/score-all")
+async def score_all_conversations():
+    """Score all conversations for quality."""
+    try:
+        from javis.training.data_quality import get_quality_scorer
+        scorer = get_quality_scorer()
+        scores = scorer.score_all_conversations()
+
+        return {
+            "count": len(scores),
+            "scores": [
+                {
+                    "conversation_id": s.conversation_id,
+                    "overall_score": s.overall_score,
+                    "length_score": s.length_score,
+                    "coherence_score": s.coherence_score,
+                    "feedback_score": s.feedback_score,
+                    "recency_score": s.recency_score,
+                }
+                for s in sorted(scores, key=lambda x: x.overall_score, reverse=True)
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Phase 5: Metrics API ====================
+
+@app.get("/api/training/metrics/{version}")
+async def get_version_metrics(version: str, days: int = 7):
+    """Get performance metrics for a model version."""
+    try:
+        from javis.training.metrics import get_metrics_collector
+        from datetime import datetime, timedelta
+
+        collector = get_metrics_collector()
+        end = datetime.now()
+        start = end - timedelta(days=days)
+
+        metrics = collector.get_metrics(version, start, end)
+
+        return {
+            "version": metrics.version,
+            "period_start": metrics.period_start.isoformat(),
+            "period_end": metrics.period_end.isoformat(),
+            "total_requests": metrics.total_requests,
+            "avg_latency_ms": round(metrics.avg_latency_ms, 2),
+            "p95_latency_ms": round(metrics.p95_latency_ms, 2),
+            "positive_feedback_rate": round(metrics.positive_feedback_rate, 4),
+            "negative_feedback_rate": round(metrics.negative_feedback_rate, 4),
+            "error_rate": round(metrics.error_rate, 4),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/metrics/compare")
+async def compare_version_metrics(version_a: str, version_b: str, days: int = 7):
+    """Compare metrics between two versions."""
+    try:
+        from javis.training.metrics import get_metrics_collector
+        collector = get_metrics_collector()
+        comparison = collector.compare_versions(version_a, version_b, days)
+        return comparison
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/metrics/dashboard")
+async def get_metrics_dashboard():
+    """Get metrics dashboard data."""
+    try:
+        from javis.training.metrics import get_metrics_collector
+        collector = get_metrics_collector()
+        return collector.get_dashboard_data()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Phase 5: A/B Testing API ====================
+
+class ABTestCreateRequest(BaseModel):
+    """Request to create an A/B test."""
+    version_a: str
+    version_b: str
+    traffic_split: float = 0.5
+    description: Optional[str] = None
+
+
+@app.post("/api/training/ab-tests")
+async def create_ab_test(request: ABTestCreateRequest):
+    """Create a new A/B test."""
+    try:
+        from javis.training.ab_testing import get_ab_test_manager
+        manager = get_ab_test_manager()
+
+        test_id = manager.create_test(
+            version_a=request.version_a,
+            version_b=request.version_b,
+            traffic_split=request.traffic_split,
+            description=request.description,
+        )
+
+        return {
+            "status": "created",
+            "test_id": test_id,
+            "version_a": request.version_a,
+            "version_b": request.version_b,
+            "traffic_split": request.traffic_split,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/ab-tests")
+async def list_ab_tests(status: Optional[str] = None):
+    """List all A/B tests."""
+    try:
+        from javis.training.ab_testing import get_ab_test_manager
+        manager = get_ab_test_manager()
+        tests = manager.list_tests(status=status)
+
+        return {
+            "count": len(tests),
+            "tests": [
+                {
+                    "test_id": t.test_id,
+                    "version_a": t.version_a,
+                    "version_b": t.version_b,
+                    "traffic_split": t.traffic_split,
+                    "status": t.status,
+                    "start_time": t.start_time.isoformat(),
+                    "end_time": t.end_time.isoformat() if t.end_time else None,
+                }
+                for t in tests
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/ab-tests/{test_id}")
+async def get_ab_test(test_id: str):
+    """Get A/B test details and results."""
+    try:
+        from javis.training.ab_testing import get_ab_test_manager
+        manager = get_ab_test_manager()
+
+        config = manager.get_test(test_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Test not found")
+
+        result = manager.calculate_results(test_id)
+
+        return {
+            "test_id": test_id,
+            "config": {
+                "version_a": config.version_a,
+                "version_b": config.version_b,
+                "traffic_split": config.traffic_split,
+                "status": config.status,
+                "start_time": config.start_time.isoformat(),
+            },
+            "results": {
+                "version_a": {
+                    "requests": result.version_a_metrics.requests,
+                    "positive_feedback": result.version_a_metrics.positive_feedback,
+                    "feedback_rate": result.version_a_metrics.feedback_rate,
+                    "avg_latency_ms": result.version_a_metrics.avg_latency_ms,
+                },
+                "version_b": {
+                    "requests": result.version_b_metrics.requests,
+                    "positive_feedback": result.version_b_metrics.positive_feedback,
+                    "feedback_rate": result.version_b_metrics.feedback_rate,
+                    "avg_latency_ms": result.version_b_metrics.avg_latency_ms,
+                },
+                "statistical_significance": result.statistical_significance,
+                "winner": result.winner,
+                "recommendation": result.recommendation,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/training/ab-tests/{test_id}/complete")
+async def complete_ab_test(test_id: str, winner: Optional[str] = None):
+    """Complete an A/B test."""
+    try:
+        from javis.training.ab_testing import get_ab_test_manager
+        manager = get_ab_test_manager()
+        manager.complete_test(test_id, winner)
+        return {"status": "completed", "test_id": test_id, "winner": winner}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/training/ab-tests/{test_id}")
+async def delete_ab_test(test_id: str):
+    """Cancel/delete an A/B test."""
+    try:
+        from javis.training.ab_testing import get_ab_test_manager
+        manager = get_ab_test_manager()
+        manager.cancel_test(test_id)
+        return {"status": "cancelled", "test_id": test_id}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Phase 5: Corrections API ====================
+
+class CorrectionRequest(BaseModel):
+    """Request to add a correction."""
+    session_id: str
+    original_prompt: str
+    original_response: str
+    corrected_response: str
+    correction_type: str = "other"
+    notes: Optional[str] = None
+
+
+@app.post("/api/training/corrections")
+async def add_correction(request: CorrectionRequest):
+    """Add a response correction."""
+    try:
+        from javis.training.corrections import get_correction_manager
+        manager = get_correction_manager()
+
+        correction_id = manager.add_correction(
+            session_id=request.session_id,
+            original_prompt=request.original_prompt,
+            original_response=request.original_response,
+            corrected_response=request.corrected_response,
+            correction_type=request.correction_type,
+            notes=request.notes,
+        )
+
+        return {
+            "status": "added",
+            "correction_id": correction_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/corrections")
+async def list_corrections(limit: int = 50):
+    """List response corrections."""
+    try:
+        from javis.training.corrections import get_correction_manager
+        manager = get_correction_manager()
+        corrections = manager.get_corrections(limit=limit)
+
+        return {
+            "count": len(corrections),
+            "corrections": [
+                {
+                    "id": c.id,
+                    "session_id": c.session_id,
+                    "correction_type": c.correction_type,
+                    "timestamp": c.timestamp.isoformat(),
+                    "original_prompt": c.original_prompt[:100] + "..." if len(c.original_prompt) > 100 else c.original_prompt,
+                }
+                for c in corrections
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/corrections/{correction_id}")
+async def get_correction(correction_id: str):
+    """Get correction details."""
+    try:
+        from javis.training.corrections import get_correction_manager
+        manager = get_correction_manager()
+        correction = manager.get_correction(correction_id)
+
+        if not correction:
+            raise HTTPException(status_code=404, detail="Correction not found")
+
+        return {
+            "id": correction.id,
+            "session_id": correction.session_id,
+            "correction_type": correction.correction_type,
+            "timestamp": correction.timestamp.isoformat(),
+            "original_prompt": correction.original_prompt,
+            "original_response": correction.original_response,
+            "corrected_response": correction.corrected_response,
+            "notes": correction.notes,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/training/corrections/{correction_id}")
+async def delete_correction_endpoint(correction_id: str):
+    """Delete a correction."""
+    try:
+        from javis.training.corrections import get_correction_manager
+        manager = get_correction_manager()
+
+        if manager.delete_correction(correction_id):
+            return {"status": "deleted", "id": correction_id}
+        else:
+            raise HTTPException(status_code=404, detail="Correction not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/corrections/stats")
+async def get_correction_stats():
+    """Get correction statistics."""
+    try:
+        from javis.training.corrections import get_correction_manager
+        manager = get_correction_manager()
+        return manager.get_statistics()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Phase 5: Enhanced Feedback API ====================
+
+class EnhancedFeedbackRequest(BaseModel):
+    """Request for enhanced feedback."""
+    session_id: str
+    prompt: str
+    response: str
+    feedback_type: str  # "good", "bad"
+    quality_score: Optional[float] = None
+    corrected_response: Optional[str] = None
+
+
+@app.post("/api/training/feedback/enhanced")
+async def add_enhanced_feedback(request: EnhancedFeedbackRequest):
+    """Add enhanced feedback with optional quality score and correction."""
+    try:
+        from javis.training.feedback_store import get_feedback_store
+        store = get_feedback_store()
+
+        if request.feedback_type == "good":
+            feedback_id = store.store_good_response(
+                session_id=request.session_id,
+                prompt=request.prompt,
+                response=request.response,
+                quality_score=request.quality_score,
+            )
+        else:
+            feedback_id = store.store_bad_response(
+                session_id=request.session_id,
+                prompt=request.prompt,
+                response=request.response,
+                corrected_response=request.corrected_response,
+            )
+
+        return {
+            "status": "added",
+            "feedback_id": feedback_id,
+            "feedback_type": request.feedback_type,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/feedback/stats")
+async def get_feedback_stats():
+    """Get enhanced feedback statistics."""
+    try:
+        from javis.training.feedback_store import get_feedback_store
+        store = get_feedback_store()
+        return store.get_statistics()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Phase 6: Voice API ====================
+
+class TTSRequest(BaseModel):
+    """TTS request."""
+    text: str
+    voice: Optional[str] = None
+
+
+@app.get("/api/voice/status")
+async def get_voice_status():
+    """Get voice system status."""
+    config = get_config()
+
+    return {
+        "enabled": config.voice.enabled,
+        "language": config.voice.language,
+        "stt": {
+            "provider": config.voice.stt.provider,
+            "model": config.voice.stt.groq_whisper.model,
+        },
+        "tts": {
+            "provider": config.voice.tts.provider,
+            "voice": config.voice.tts.edge_tts.voice,
+        },
+    }
+
+
+@app.post("/api/voice/stt")
+async def voice_stt(file: UploadFile = File(...), language: str = "ko"):
+    """Convert speech to text.
+
+    Upload an audio file and get transcription.
+    Supported formats: wav, mp3, m4a, webm
+    """
+    config = get_config()
+
+    if not config.voice.enabled:
+        raise HTTPException(status_code=400, detail="Voice interface is disabled")
+
+    if not config.groq_api_key:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
+
+    try:
+        from javis.voice import get_stt_provider
+
+        stt = get_stt_provider()
+
+        # Read uploaded file
+        audio_data = await file.read()
+
+        # Transcribe
+        result = await stt.transcribe(
+            audio_data=audio_data,
+            language=language,
+            filename=file.filename or "audio.wav",
+        )
+
+        return {
+            "text": result.text,
+            "language": result.language,
+            "duration": result.duration,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/voice/tts")
+async def voice_tts(request: TTSRequest):
+    """Convert text to speech.
+
+    Returns audio as MP3 stream.
+    """
+    config = get_config()
+
+    if not config.voice.enabled:
+        raise HTTPException(status_code=400, detail="Voice interface is disabled")
+
+    try:
+        from javis.voice import get_tts_provider
+        from javis.voice.tts.edge_tts_provider import EdgeTTSProvider
+
+        # Use custom voice if specified
+        if request.voice:
+            tts = EdgeTTSProvider(voice=request.voice)
+        else:
+            tts = get_tts_provider()
+
+        # Generate audio
+        audio_data = await tts.synthesize(request.text)
+
+        return StreamingResponse(
+            iter([audio_data]),
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "attachment; filename=speech.mp3",
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/voice/tts/stream")
+async def voice_tts_stream(request: TTSRequest):
+    """Stream text-to-speech audio.
+
+    Returns chunked audio stream.
+    """
+    config = get_config()
+
+    if not config.voice.enabled:
+        raise HTTPException(status_code=400, detail="Voice interface is disabled")
+
+    try:
+        from javis.voice import get_tts_provider
+        from javis.voice.tts.edge_tts_provider import EdgeTTSProvider
+
+        # Use custom voice if specified
+        if request.voice:
+            tts = EdgeTTSProvider(voice=request.voice)
+        else:
+            tts = get_tts_provider()
+
+        async def audio_generator():
+            async for chunk in tts.synthesize_stream(request.text):
+                yield chunk
+
+        return StreamingResponse(
+            audio_generator(),
+            media_type="audio/mpeg",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/voice/chat")
+async def voice_chat(
+    file: UploadFile = File(...),
+    session_id: str = "default",
+    language: str = "ko",
+):
+    """Voice chat: speech input → text response.
+
+    Upload audio, get AI response as text.
+    """
+    config = get_config()
+
+    if not config.voice.enabled:
+        raise HTTPException(status_code=400, detail="Voice interface is disabled")
+
+    if not config.groq_api_key:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
+
+    try:
+        from javis.voice import get_stt_provider
+
+        stt = get_stt_provider()
+
+        # 1. Transcribe audio
+        audio_data = await file.read()
+        transcription = await stt.transcribe(
+            audio_data=audio_data,
+            language=language,
+            filename=file.filename or "audio.wav",
+        )
+
+        if not transcription.text.strip():
+            return {
+                "transcription": "",
+                "response": "음성을 인식하지 못했습니다.",
+                "session_id": session_id,
+            }
+
+        # 2. Get chat response using existing chat logic
+        messages = get_or_create_session(session_id)
+        messages.append(Message(role="user", content=transcription.text))
+
+        # Use Groq for response
+        client = ModelClient()
+        response = await client.chat(messages)
+
+        messages.append(Message(role="assistant", content=response.content))
+
+        # Trim history
+        max_history = config.conversation.max_history
+        if len(messages) > max_history + 1:
+            sessions[session_id] = [messages[0]] + messages[-(max_history):]
+
+        return {
+            "transcription": transcription.text,
+            "response": response.content,
+            "session_id": session_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/voice/tts/voices")
+async def list_tts_voices(language: Optional[str] = None):
+    """List available TTS voices.
+
+    Args:
+        language: Filter by language (e.g., "ko-KR", "en-US")
+    """
+    try:
+        from javis.voice.tts.edge_tts_provider import EdgeTTSProvider
+
+        voices = await EdgeTTSProvider.list_voices(language)
+
+        return {
+            "count": len(voices),
+            "voices": voices,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Phase 6-2: Workflow API ====================
+
+@app.get("/api/workflows")
+async def list_workflows():
+    """List all workflows."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        return {
+            "enabled": False,
+            "message": "Workflows are disabled in config",
+        }
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        scheduler.load_workflows()
+
+        workflows = scheduler.list_workflows()
+
+        return {
+            "enabled": True,
+            "count": len(workflows),
+            "workflows": [
+                {
+                    "name": wf.name,
+                    "description": wf.description,
+                    "enabled": wf.enabled,
+                    "trigger_type": wf.trigger_type,
+                    "trigger_schedule": wf.trigger_schedule,
+                    "next_run": wf.next_run.isoformat() if wf.next_run else None,
+                    "last_run": wf.last_run.isoformat() if wf.last_run else None,
+                    "last_status": wf.last_status,
+                    "tags": wf.tags,
+                }
+                for wf in workflows
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/workflows/{name}")
+async def get_workflow(name: str):
+    """Get workflow details."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        raise HTTPException(status_code=400, detail="Workflows are disabled")
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        scheduler.load_workflows()
+
+        workflow = scheduler.get_workflow(name)
+        if not workflow:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {name}")
+
+        info = next((w for w in scheduler.list_workflows() if w.name == name), None)
+
+        return {
+            "name": workflow.name,
+            "description": workflow.description,
+            "enabled": workflow.enabled,
+            "trigger": {
+                "type": workflow.trigger.type.value,
+                "cron": workflow.trigger.cron,
+                "interval_seconds": workflow.trigger.interval_seconds,
+                "timezone": workflow.trigger.timezone,
+            },
+            "steps": [
+                {
+                    "name": step.name,
+                    "action": step.action,
+                    "params": step.params,
+                    "condition": step.condition,
+                    "on_failure": step.on_failure.value,
+                    "timeout": step.timeout,
+                    "retries": step.retries,
+                }
+                for step in workflow.steps
+            ],
+            "on_success": workflow.on_success.model_dump() if workflow.on_success else None,
+            "on_failure": workflow.on_failure.model_dump() if workflow.on_failure else None,
+            "tags": workflow.tags,
+            "last_run": info.last_run.isoformat() if info and info.last_run else None,
+            "last_status": info.last_status if info else None,
+            "next_run": info.next_run.isoformat() if info and info.next_run else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/workflows/{name}/run")
+async def run_workflow(name: str):
+    """Run a workflow immediately."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        raise HTTPException(status_code=400, detail="Workflows are disabled")
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        scheduler.load_workflows()
+
+        workflow = scheduler.get_workflow(name)
+        if not workflow:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {name}")
+
+        result = scheduler.trigger_now(name)
+
+        return {
+            "workflow_name": result.workflow_name,
+            "run_id": result.run_id,
+            "status": result.status.value,
+            "started_at": result.started_at.isoformat(),
+            "completed_at": result.completed_at.isoformat() if result.completed_at else None,
+            "duration": result.duration,
+            "steps": [
+                {
+                    "step_name": step.step_name,
+                    "status": step.status.value,
+                    "duration": step.duration,
+                    "output": step.output,
+                    "error": step.error,
+                }
+                for step in result.steps
+            ],
+            "error": result.error,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/workflows/{name}/enable")
+async def enable_workflow(name: str):
+    """Enable a workflow."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        raise HTTPException(status_code=400, detail="Workflows are disabled")
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        scheduler.load_workflows()
+
+        if scheduler.enable_workflow(name):
+            return {"status": "enabled", "name": name}
+        else:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {name}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/workflows/{name}/disable")
+async def disable_workflow(name: str):
+    """Disable a workflow."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        raise HTTPException(status_code=400, detail="Workflows are disabled")
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        scheduler.load_workflows()
+
+        if scheduler.disable_workflow(name):
+            return {"status": "disabled", "name": name}
+        else:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {name}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/workflows/{name}/history")
+async def get_workflow_history(name: str, limit: int = 10):
+    """Get workflow execution history."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        raise HTTPException(status_code=400, detail="Workflows are disabled")
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        scheduler.load_workflows()
+
+        workflow = scheduler.get_workflow(name)
+        if not workflow:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {name}")
+
+        history = scheduler.get_history(name, limit=limit)
+
+        return {
+            "workflow_name": name,
+            "count": len(history),
+            "history": [
+                {
+                    "run_id": result.run_id,
+                    "status": result.status.value,
+                    "started_at": result.started_at.isoformat(),
+                    "completed_at": result.completed_at.isoformat() if result.completed_at else None,
+                    "duration": result.duration,
+                    "steps_succeeded": sum(1 for s in result.steps if s.status.value == "success"),
+                    "steps_total": len(result.steps),
+                    "error": result.error,
+                }
+                for result in history
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/workflows/reload")
+async def reload_workflows():
+    """Reload workflows from disk."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        raise HTTPException(status_code=400, detail="Workflows are disabled")
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        count = scheduler.reload_workflows()
+
+        return {
+            "status": "reloaded",
+            "count": count,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/workflows/scheduler/status")
+async def get_workflow_scheduler_status():
+    """Get workflow scheduler status."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        return {
+            "enabled": False,
+            "message": "Workflows are disabled in config",
+        }
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+
+        return {
+            "enabled": True,
+            "running": scheduler.is_running,
+            "workflows_loaded": len(scheduler._workflows),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/workflows/scheduler/start")
+async def start_workflow_scheduler_api():
+    """Start the workflow scheduler."""
+    config = get_config()
+
+    if not config.workflows.enabled:
+        raise HTTPException(status_code=400, detail="Workflows are disabled")
+
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        success = scheduler.start()
+
+        if success:
+            return {
+                "status": "started",
+                "workflows_scheduled": len([w for w in scheduler._workflows.values() if w.enabled]),
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to start scheduler")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/workflows/scheduler/stop")
+async def stop_workflow_scheduler_api():
+    """Stop the workflow scheduler."""
+    try:
+        from javis.workflows import get_workflow_scheduler
+
+        scheduler = get_workflow_scheduler()
+        scheduler.stop()
+
+        return {"status": "stopped"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Static files (if exists)
 static_dir = Path(__file__).parent.parent.parent / "static"
 if static_dir.exists():

@@ -355,6 +355,330 @@ def active_command():
         print("No active model version.")
 
 
+# Phase 5 Commands
+
+def quality_command(action: str, min_score: float = 3.5, output: str = None):
+    """Data quality management commands."""
+    from .data_quality import get_quality_scorer
+
+    scorer = get_quality_scorer()
+
+    if action == "stats":
+        stats = scorer.get_statistics()
+        print(f"\n{'='*40}")
+        print("Data Quality Statistics")
+        print(f"{'='*40}")
+        print(f"Total conversations: {stats['total']}")
+        print(f"High quality (>=4.0): {stats['high_quality']}")
+        print(f"Medium quality (3.0-4.0): {stats['medium_quality']}")
+        print(f"Low quality (<3.0): {stats['low_quality']}")
+        print(f"Average score: {stats['average_score']}")
+        if stats['total'] > 0:
+            print(f"Score range: {stats['min_score']} - {stats['max_score']}")
+        print(f"{'='*40}")
+
+    elif action == "score-all":
+        print("Scoring all conversations...")
+        scores = scorer.score_all_conversations()
+        print(f"\nScored {len(scores)} conversations")
+        for score in sorted(scores, key=lambda x: x.overall_score, reverse=True)[:10]:
+            print(f"  {score.conversation_id}: {score.overall_score}")
+        if len(scores) > 10:
+            print(f"  ... and {len(scores) - 10} more")
+
+    elif action == "export":
+        output_path = Path(output) if output else None
+        path = scorer.export_quality_report(output_path)
+        print(f"Exported quality report to: {path}")
+
+    elif action == "high-quality":
+        ids = scorer.get_high_quality_ids(min_score)
+        print(f"\nHigh quality conversations (score >= {min_score}):")
+        print(f"{'='*40}")
+        for cid in ids:
+            print(f"  {cid}")
+        print(f"\nTotal: {len(ids)}")
+
+    else:
+        print(f"Unknown action: {action}")
+        print("Available actions: stats, score-all, export, high-quality")
+
+
+def metrics_command(action: str, version: str = None, version_a: str = None, version_b: str = None, days: int = 7):
+    """Performance metrics commands."""
+    from .metrics import get_metrics_collector
+
+    collector = get_metrics_collector()
+
+    if action == "show":
+        if not version:
+            print("Error: --version required")
+            return
+
+        from datetime import datetime, timedelta
+        end = datetime.now()
+        start = end - timedelta(days=days)
+
+        metrics = collector.get_metrics(version, start, end)
+        print(f"\n{'='*50}")
+        print(f"Performance Metrics: {version}")
+        print(f"{'='*50}")
+        print(f"Period: {start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}")
+        print(f"Total requests: {metrics.total_requests}")
+        print(f"Average latency: {metrics.avg_latency_ms:.2f} ms")
+        print(f"P95 latency: {metrics.p95_latency_ms:.2f} ms")
+        print(f"Positive feedback rate: {metrics.positive_feedback_rate*100:.1f}%")
+        print(f"Negative feedback rate: {metrics.negative_feedback_rate*100:.1f}%")
+        print(f"Error rate: {metrics.error_rate*100:.1f}%")
+        print(f"{'='*50}")
+
+    elif action == "compare":
+        if not version_a or not version_b:
+            print("Error: --version-a and --version-b required")
+            return
+
+        comparison = collector.compare_versions(version_a, version_b, days)
+        print(f"\n{'='*60}")
+        print(f"Version Comparison ({days} days)")
+        print(f"{'='*60}")
+        print(f"\n{'Metric':<25} {'Version A':<15} {'Version B':<15} {'Change'}")
+        print("-" * 60)
+
+        va = comparison["version_a"]
+        vb = comparison["version_b"]
+        ch = comparison["comparison"]
+
+        print(f"{'Version':<25} {va['version']:<15} {vb['version']:<15}")
+        print(f"{'Requests':<25} {va['requests']:<15} {vb['requests']:<15}")
+        print(f"{'Avg Latency (ms)':<25} {va['avg_latency_ms']:<15} {vb['avg_latency_ms']:<15} {ch['latency_change_pct']:+.1f}%")
+        print(f"{'Positive Rate':<25} {va['positive_feedback_rate']*100:.1f}%{'':<9} {vb['positive_feedback_rate']*100:.1f}%{'':<9} {ch['feedback_change_pct']:+.1f}%")
+        print(f"{'Error Rate':<25} {va['error_rate']*100:.1f}%{'':<10} {vb['error_rate']*100:.1f}%{'':<10} {ch['error_change_pct']:+.1f}%")
+        print(f"{'='*60}")
+
+    elif action == "dashboard":
+        data = collector.get_dashboard_data()
+        print(f"\n{'='*60}")
+        print("Metrics Dashboard (Last 7 Days)")
+        print(f"{'='*60}")
+        print(f"Total requests: {data['total_requests']}")
+        print(f"\n{'Version':<20} {'Requests':<12} {'Latency':<12} {'Positive':<10} {'Errors'}")
+        print("-" * 60)
+        for v in data["versions"]:
+            print(f"{v['version']:<20} {v['requests']:<12} {v['avg_latency_ms']:<12.1f} {v['positive_rate']:<10.1f}% {v['error_rate']:.1f}%")
+        print(f"{'='*60}")
+
+    elif action == "cleanup":
+        removed = collector.cleanup_old_metrics()
+        print(f"Cleaned up {removed} old metrics files")
+
+    else:
+        print(f"Unknown action: {action}")
+        print("Available actions: show, compare, dashboard, cleanup")
+
+
+def abtest_command(action: str, version_a: str = None, version_b: str = None, test_id: str = None, split: float = 0.5, winner: str = None):
+    """A/B testing commands."""
+    from .ab_testing import get_ab_test_manager
+
+    manager = get_ab_test_manager()
+
+    if action == "create":
+        if not version_a or not version_b:
+            print("Error: --version-a and --version-b required")
+            return
+
+        test_id = manager.create_test(version_a, version_b, split)
+        print(f"\n{'='*50}")
+        print("A/B Test Created")
+        print(f"{'='*50}")
+        print(f"Test ID: {test_id}")
+        print(f"Version A (control): {version_a}")
+        print(f"Version B (treatment): {version_b}")
+        print(f"Traffic split: {split*100:.0f}% to version B")
+        print(f"{'='*50}")
+
+    elif action == "list":
+        tests = manager.list_tests()
+        print(f"\n{'='*70}")
+        print("A/B Tests")
+        print(f"{'='*70}")
+        print(f"{'Test ID':<35} {'Status':<12} {'Start Date'}")
+        print("-" * 70)
+        for test in tests:
+            print(f"{test.test_id:<35} {test.status:<12} {test.start_time.strftime('%Y-%m-%d')}")
+        if not tests:
+            print("No A/B tests found.")
+        print(f"{'='*70}")
+
+    elif action == "status":
+        if not test_id:
+            # Check for active test
+            active = manager.get_active_test()
+            if active:
+                test_id = active.test_id
+            else:
+                print("No active test. Specify --test-id")
+                return
+
+        result = manager.calculate_results(test_id)
+        config = manager.get_test(test_id)
+
+        print(f"\n{'='*60}")
+        print(f"A/B Test Status: {test_id}")
+        print(f"{'='*60}")
+        print(f"Status: {config.status}")
+        print(f"\n{'Metric':<25} {'Version A':<15} {'Version B'}")
+        print("-" * 55)
+        ma = result.version_a_metrics
+        mb = result.version_b_metrics
+        print(f"{'Version':<25} {ma.version:<15} {mb.version}")
+        print(f"{'Requests':<25} {ma.requests:<15} {mb.requests}")
+        print(f"{'Positive Feedback':<25} {ma.positive_feedback:<15} {mb.positive_feedback}")
+        print(f"{'Feedback Rate':<25} {ma.feedback_rate*100:.1f}%{'':<9} {mb.feedback_rate*100:.1f}%")
+        print(f"{'Avg Latency (ms)':<25} {ma.avg_latency_ms:.1f}{'':<9} {mb.avg_latency_ms:.1f}")
+        print(f"\nStatistical significance: {result.statistical_significance*100:.1f}%")
+        print(f"Recommendation: {result.recommendation}")
+        print(f"{'='*60}")
+
+    elif action == "complete":
+        if not test_id:
+            print("Error: --test-id required")
+            return
+
+        manager.complete_test(test_id, winner)
+        print(f"Test {test_id} completed.")
+        if winner:
+            print(f"Winner: {winner}")
+
+    elif action == "cancel":
+        if not test_id:
+            print("Error: --test-id required")
+            return
+
+        manager.cancel_test(test_id)
+        print(f"Test {test_id} cancelled.")
+
+    else:
+        print(f"Unknown action: {action}")
+        print("Available actions: create, list, status, complete, cancel")
+
+
+def validate_command(version: str = None):
+    """Model validation command."""
+    from .validation import get_validator, save_default_prompts
+    from .version_manager import get_version_manager
+
+    validator = get_validator()
+    vm = get_version_manager()
+
+    if version is None:
+        version = vm.get_active_version()
+        if not version:
+            print("No version specified and no active version found.")
+            return
+
+    adapter_path = vm.get_version_path(version)
+    if not adapter_path:
+        print(f"Version not found: {version}")
+        return
+
+    adapter_path = adapter_path / "adapter"
+
+    print(f"\n{'='*50}")
+    print(f"Validating Model: {version}")
+    print(f"{'='*50}")
+
+    # File-based validation
+    result = validator.validate_files_only(adapter_path, version)
+
+    print(f"\nFile Validation:")
+    print(f"  Passed: {result.passed_tests}/{result.total_tests}")
+
+    if result.failed_tests:
+        print(f"\n  Failed checks:")
+        for test in result.failed_tests:
+            print(f"    - {test.failure_reason}")
+
+    print(f"\nOverall: {'PASSED' if result.passed else 'FAILED'}")
+    print(f"{'='*50}")
+
+    # Save result
+    validator.save_validation_result(result)
+
+
+def correction_command(action: str, correction_id: str = None, output: str = None):
+    """Response correction commands."""
+    from .corrections import get_correction_manager
+
+    manager = get_correction_manager()
+
+    if action == "list":
+        corrections = manager.get_corrections(limit=20)
+        print(f"\n{'='*70}")
+        print("Recent Corrections")
+        print(f"{'='*70}")
+        print(f"{'ID':<30} {'Type':<15} {'Date'}")
+        print("-" * 70)
+        for corr in corrections:
+            print(f"{corr.id:<30} {corr.correction_type:<15} {corr.timestamp.strftime('%Y-%m-%d %H:%M')}")
+        print(f"\nTotal: {len(corrections)}")
+        print(f"{'='*70}")
+
+    elif action == "stats":
+        stats = manager.get_statistics()
+        print(f"\n{'='*40}")
+        print("Correction Statistics")
+        print(f"{'='*40}")
+        print(f"Total corrections: {stats['total']}")
+        print(f"This month: {stats['this_month']}")
+        print(f"\nBy type:")
+        for ctype, count in stats['by_type'].items():
+            print(f"  {ctype}: {count}")
+        print(f"{'='*40}")
+
+    elif action == "export":
+        output_path = Path(output) if output else None
+        path = manager.export_for_training(output_path)
+        print(f"Exported corrections to: {path}")
+
+    elif action == "show":
+        if not correction_id:
+            print("Error: --id required")
+            return
+
+        corr = manager.get_correction(correction_id)
+        if not corr:
+            print(f"Correction not found: {correction_id}")
+            return
+
+        print(f"\n{'='*60}")
+        print(f"Correction: {corr.id}")
+        print(f"{'='*60}")
+        print(f"Type: {corr.correction_type}")
+        print(f"Session: {corr.session_id}")
+        print(f"Date: {corr.timestamp}")
+        print(f"\nOriginal prompt:\n  {corr.original_prompt}")
+        print(f"\nOriginal response:\n  {corr.original_response[:200]}...")
+        print(f"\nCorrected response:\n  {corr.corrected_response[:200]}...")
+        if corr.notes:
+            print(f"\nNotes: {corr.notes}")
+        print(f"{'='*60}")
+
+    elif action == "delete":
+        if not correction_id:
+            print("Error: --id required")
+            return
+
+        if manager.delete_correction(correction_id):
+            print(f"Deleted correction: {correction_id}")
+        else:
+            print(f"Correction not found: {correction_id}")
+
+    else:
+        print(f"Unknown action: {action}")
+        print("Available actions: list, stats, export, show, delete")
+
+
 def main():
     parser = argparse.ArgumentParser(description="JAVIS Model Management")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
@@ -412,6 +736,63 @@ def main():
     # active command
     active_parser = subparsers.add_parser("active", help="Show active model version")
 
+    # Phase 5: quality command
+    quality_parser = subparsers.add_parser("quality", help="Data quality management")
+    quality_parser.add_argument(
+        "action",
+        choices=["stats", "score-all", "export", "high-quality"],
+        help="Quality action"
+    )
+    quality_parser.add_argument(
+        "--min-score",
+        type=float,
+        default=3.5,
+        help="Minimum score threshold"
+    )
+    quality_parser.add_argument(
+        "--output", "-o",
+        help="Output file path"
+    )
+
+    # Phase 5: metrics command
+    metrics_parser = subparsers.add_parser("metrics", help="Performance metrics")
+    metrics_parser.add_argument(
+        "action",
+        choices=["show", "compare", "dashboard", "cleanup"],
+        help="Metrics action"
+    )
+    metrics_parser.add_argument("--version", help="Model version")
+    metrics_parser.add_argument("--version-a", help="First version for comparison")
+    metrics_parser.add_argument("--version-b", help="Second version for comparison")
+    metrics_parser.add_argument("--days", type=int, default=7, help="Number of days")
+
+    # Phase 5: ab-test command
+    abtest_parser = subparsers.add_parser("ab-test", help="A/B testing")
+    abtest_parser.add_argument(
+        "action",
+        choices=["create", "list", "status", "complete", "cancel"],
+        help="A/B test action"
+    )
+    abtest_parser.add_argument("--version-a", help="Control version")
+    abtest_parser.add_argument("--version-b", help="Treatment version")
+    abtest_parser.add_argument("--test-id", help="Test ID")
+    abtest_parser.add_argument("--split", type=float, default=0.5, help="Traffic split for version B")
+    abtest_parser.add_argument("--winner", help="Declare winner when completing")
+
+    # Phase 5: validate command
+    validate_parser = subparsers.add_parser("validate", help="Validate model")
+    validate_parser.add_argument("version", nargs="?", help="Version to validate")
+
+    # Phase 5: correction command
+    correction_parser = subparsers.add_parser("correction", help="Response corrections")
+    correction_parser.add_argument(
+        "action",
+        choices=["list", "stats", "export", "show", "delete"],
+        help="Correction action"
+    )
+    correction_parser.add_argument("--id", dest="correction_id", help="Correction ID")
+    correction_parser.add_argument("--output", "-o", help="Output file path")
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -434,6 +815,38 @@ def main():
         rollback_command(args.version)
     elif args.command == "active":
         active_command()
+    # Phase 5 commands
+    elif args.command == "quality":
+        quality_command(
+            action=args.action,
+            min_score=args.min_score,
+            output=args.output
+        )
+    elif args.command == "metrics":
+        metrics_command(
+            action=args.action,
+            version=args.version,
+            version_a=getattr(args, 'version_a', None),
+            version_b=getattr(args, 'version_b', None),
+            days=args.days
+        )
+    elif args.command == "ab-test":
+        abtest_command(
+            action=args.action,
+            version_a=getattr(args, 'version_a', None),
+            version_b=getattr(args, 'version_b', None),
+            test_id=getattr(args, 'test_id', None),
+            split=args.split,
+            winner=getattr(args, 'winner', None)
+        )
+    elif args.command == "validate":
+        validate_command(version=args.version)
+    elif args.command == "correction":
+        correction_command(
+            action=args.action,
+            correction_id=args.correction_id,
+            output=args.output
+        )
     else:
         parser.print_help()
 

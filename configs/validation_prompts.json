@@ -1,0 +1,51 @@
+[
+  {
+    "prompt": "What is 2+2?",
+    "expected_keywords": ["4"],
+    "forbidden_keywords": [],
+    "max_latency_ms": 5000,
+    "category": "general"
+  },
+  {
+    "prompt": "Write a Python function to add two numbers.",
+    "expected_keywords": ["def", "return"],
+    "forbidden_keywords": [],
+    "max_latency_ms": 10000,
+    "category": "code"
+  },
+  {
+    "prompt": "Say hello in Korean.",
+    "expected_keywords": ["안녕"],
+    "forbidden_keywords": [],
+    "max_latency_ms": 5000,
+    "category": "korean"
+  },
+  {
+    "prompt": "What is the capital of South Korea?",
+    "expected_keywords": ["Seoul", "서울"],
+    "forbidden_keywords": [],
+    "max_latency_ms": 5000,
+    "category": "general"
+  },
+  {
+    "prompt": "Explain what a for loop does in programming.",
+    "expected_keywords": ["loop", "iterate", "repeat"],
+    "forbidden_keywords": [],
+    "max_latency_ms": 8000,
+    "category": "code"
+  },
+  {
+    "prompt": "List 3 programming languages.",
+    "expected_keywords": ["Python", "Java", "JavaScript", "C", "Go", "Rust", "Ruby"],
+    "forbidden_keywords": [],
+    "max_latency_ms": 5000,
+    "category": "general"
+  },
+  {
+    "prompt": "What is JSON?",
+    "expected_keywords": ["JavaScript", "Object", "Notation", "data", "format"],
+    "forbidden_keywords": [],
+    "max_latency_ms": 6000,
+    "category": "code"
+  }
+]

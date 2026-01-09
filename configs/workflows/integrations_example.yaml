@@ -1,0 +1,77 @@
+# Integrations Example Workflow
+# Phase 7 외부 서비스 연동 기능을 보여주는 예제
+
+name: integrations_example
+description: "외부 서비스 연동 예제 (Calendar, Notion, Slack)"
+enabled: false  # API 키 설정 후 true로 변경
+
+trigger:
+  type: manual  # 수동 실행
+
+steps:
+  # 1. 오늘 일정 조회
+  - name: get_calendar
+    action: list_calendar_events
+    params:
+      time_min: "today"
+      time_max: "today"
+      max_results: 5
+    on_failure: continue  # API 미설정시에도 계속 진행
+
+  # 2. Notion 검색
+  - name: search_notion
+    action: search_notion
+    params:
+      query: "JAVIS"
+      page_size: 3
+    on_failure: continue
+
+  # 3. 결과 요약 생성
+  - name: set_summary
+    action: set_variable
+    params:
+      name: summary
+      value: |
+        :robot_face: *JAVIS 연동 테스트*
+
+        :calendar: *오늘 일정*
+        {% if steps.get_calendar.success %}
+        {{ steps.get_calendar.output.count }}개의 일정
+        {% else %}
+        (Calendar 미연결)
+        {% endif %}
+
+        :notebook: *Notion 검색*
+        {% if steps.search_notion.success %}
+        {{ steps.search_notion.output.count }}개 결과
+        {% else %}
+        (Notion 미연결)
+        {% endif %}
+
+  # 4. Slack으로 결과 전송
+  - name: send_slack
+    action: slack_post_message
+    params:
+      channel: "#general"
+      text: "{{ variables.summary }}"
+    on_failure: continue
+
+  # 5. 최종 로그
+  - name: log_complete
+    action: log
+    params:
+      message: "연동 테스트 완료"
+      level: info
+
+on_success:
+  notify: false
+
+on_failure:
+  notify: false
+
+tags:
+  - integrations
+  - test
+  - calendar
+  - notion
+  - slack

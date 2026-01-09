@@ -1,0 +1,32 @@
+# Example Workflow
+# 시스템 상태를 확인하고 로그에 기록하는 간단한 예제
+
+name: example
+description: "시스템 상태 확인 예제 워크플로우"
+enabled: true
+
+trigger:
+  type: manual  # 수동 실행만 가능
+
+steps:
+  - name: get_system_info
+    action: system_info
+    on_failure: continue
+
+  - name: get_current_time
+    action: get_datetime
+    params:
+      timezone: "Asia/Seoul"
+      format: "%Y-%m-%d %H:%M:%S"
+
+  - name: log_result
+    action: log
+    params:
+      message: "시스템 정보 수집 완료: {{ steps.get_current_time.output }}"
+      level: info
+
+on_success:
+  notify: false
+
+on_failure:
+  notify: false
