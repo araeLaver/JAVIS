@@ -13,6 +13,7 @@ from javis.utils.config import TrainingConfig, get_config
 from .ab_testing import ABTestManager, get_ab_test_manager
 from .data_quality import DataQualityScorer, get_quality_scorer
 from .notifications import NotificationService, get_notifier
+from .preference_data import PreferenceDataGenerator, get_preference_generator
 from .remote import RemoteTrainer, TrainingResult
 from .validation import ModelValidator, get_validator
 from .version_manager import VersionManager, get_version_manager
@@ -68,6 +69,7 @@ class TrainingPipeline:
         self.quality_scorer = get_quality_scorer()
         self.model_validator = get_validator()
         self.ab_test_manager = get_ab_test_manager()
+        self.preference_generator = get_preference_generator()
 
     def get_data_stats(self) -> DataStats:
         """Get statistics about available training data."""
@@ -429,8 +431,186 @@ class TrainingPipeline:
                 error=str(e),
             )
 
+    def check_dpo_conditions(self) -> tuple[bool, str]:
+        """Check if DPO training conditions are met.
+
+        Returns:
+            (can_train, reason) tuple
+        """
+        stats = self.preference_generator.get_statistics()
+        min_pairs = self.config.dpo.min_preference_pairs
+
+        if stats.total_pairs < min_pairs:
+            return (
+                False,
+                f"Not enough preference data: {stats.total_pairs}/{min_pairs} pairs",
+            )
+
+        return True, "All DPO conditions met"
+
+    def run_dpo(self, force: bool = False) -> PipelineResult:
+        """Execute DPO training pipeline.
+
+        Args:
+            force: Skip condition checks and run anyway
+
+        Returns:
+            PipelineResult with status and version info
+        """
+        start_time = datetime.now()
+        logger.info("Starting DPO training pipeline")
+
+        try:
+            # Phase 1: Check conditions
+            if not force:
+                can_train, reason = self.check_dpo_conditions()
+                if not can_train:
+                    logger.info(f"Skipping DPO training: {reason}")
+                    return PipelineResult(
+                        success=True, skipped=True, skip_reason=reason
+                    )
+
+            # Phase 2: Export preference data
+            logger.info("Exporting preference data...")
+            pairs = self.preference_generator.generate_all()
+            data_path = self.preference_generator.export_dpo_dataset(pairs=pairs)
+
+            dataset_size = len(pairs)
+            if dataset_size == 0:
+                return PipelineResult(
+                    success=False,
+                    error="No preference data after export",
+                )
+
+            # Phase 3: Run DPO training
+            logger.info(f"Starting remote DPO training with {dataset_size} pairs...")
+            dpo_config = self.config.dpo
+            training_config = {
+                "base_model": self.config.model.base_model,
+                "epochs": self.config.model.epochs,
+                "batch_size": self.config.model.batch_size,
+                "learning_rate": self.config.model.learning_rate,
+                "lora_r": self.config.model.lora_r,
+                "lora_alpha": self.config.model.lora_alpha,
+                "beta": dpo_config.beta,
+                "loss_type": dpo_config.loss_type,
+                "max_prompt_length": dpo_config.max_prompt_length,
+                "max_length": dpo_config.max_response_length,
+                "method": "dpo",
+            }
+
+            result = self.remote_trainer.train(data_path, training_config)
+
+            if not result.success:
+                logger.error(f"DPO Training failed: {result.error}")
+                self.notifier.notify_failure(result.error or "Unknown error", {
+                    "method": "dpo",
+                    "version": result.version,
+                    "dataset_size": dataset_size,
+                })
+                return PipelineResult(
+                    success=False,
+                    version=result.version,
+                    error=result.error,
+                    dataset_size=dataset_size,
+                )
+
+            # Phase 4: Validate model
+            logger.info("Validating DPO-trained model...")
+            if result.adapter_path and not self.validate_model(
+                result.adapter_path, result.version
+            ):
+                logger.error("DPO model validation failed")
+                self.version_manager.mark_failed(result.version)
+                self.notifier.notify_failure("DPO model validation failed", {
+                    "method": "dpo",
+                    "version": result.version,
+                })
+                return PipelineResult(
+                    success=False,
+                    version=result.version,
+                    error="DPO model validation failed",
+                    dataset_size=dataset_size,
+                )
+
+            # Phase 5: Create version
+            logger.info(f"Creating DPO version {result.version}...")
+            if result.adapter_path:
+                metadata = result.metadata.copy()
+                metadata["dataset_size"] = dataset_size
+                metadata["training_config"] = training_config
+                metadata["training_method"] = "dpo"
+
+                self.version_manager.create_version(
+                    result.adapter_path, metadata, result.version
+                )
+
+            # Phase 6: Deploy or A/B test
+            ab_test_id = None
+            current_version = self.version_manager.get_active_version()
+
+            if self.config.ab_testing.auto_create and current_version:
+                logger.info(
+                    f"Creating A/B test: {current_version.version} vs {result.version} (DPO)"
+                )
+                ab_test_id = self.ab_test_manager.create_test(
+                    version_a=current_version.version,
+                    version_b=result.version,
+                    description=f"Auto-created: DPO {result.version} vs {current_version.version}",
+                )
+                logger.info(f"A/B test created: {ab_test_id}")
+
+            elif self.config.deployment.auto_deploy:
+                logger.info(f"Activating DPO version {result.version}...")
+                self.version_manager.activate_version(result.version)
+
+                removed = self.version_manager.cleanup_old_versions(
+                    keep=self.config.deployment.keep_versions
+                )
+                if removed:
+                    logger.info(f"Cleaned up old versions: {removed}")
+
+            # Phase 7: Notify success
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+
+            notify_metadata = {
+                "method": "dpo",
+                "dataset_size": dataset_size,
+                "duration_seconds": duration,
+                "auto_deployed": self.config.deployment.auto_deploy
+                and not ab_test_id,
+            }
+            if ab_test_id:
+                notify_metadata["ab_test_id"] = ab_test_id
+                notify_metadata["ab_test_enabled"] = True
+
+            self.notifier.notify_success(result.version, notify_metadata)
+
+            logger.info(f"DPO Pipeline complete: version {result.version}")
+            return PipelineResult(
+                success=True,
+                version=result.version,
+                duration_seconds=duration,
+                dataset_size=dataset_size,
+            )
+
+        except Exception as e:
+            logger.exception("DPO Pipeline failed with exception")
+            self.notifier.notify_failure(str(e), {"method": "dpo"})
+            return PipelineResult(
+                success=False,
+                error=str(e),
+            )
+
 
 def run_pipeline(force: bool = False) -> PipelineResult:
     """Convenience function to run the training pipeline."""
     pipeline = TrainingPipeline()
     return pipeline.run(force=force)
+
+
+def run_dpo_pipeline(force: bool = False) -> PipelineResult:
+    """Convenience function to run the DPO training pipeline."""
+    pipeline = TrainingPipeline()
+    return pipeline.run_dpo(force=force)

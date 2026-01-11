@@ -889,6 +889,96 @@ async def trigger_training():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== DPO Training API ====================
+
+@app.get("/api/training/dpo/stats", tags=["Training"])
+async def get_dpo_preference_stats():
+    """Get statistics about available preference data for DPO training."""
+    try:
+        from javis.training.preference_data import get_preference_generator
+
+        generator = get_preference_generator()
+        stats = generator.get_statistics()
+
+        return {
+            "total_pairs": stats.total_pairs,
+            "from_corrections": stats.from_corrections,
+            "from_feedback": stats.from_feedback,
+            "from_quality_score": stats.from_quality_score,
+            "ready_for_training": stats.ready_for_training,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/training/dpo/export", tags=["Training"])
+async def export_dpo_preference_data():
+    """Export preference data for DPO training as JSONL."""
+    try:
+        from javis.training.preference_data import get_preference_generator
+
+        generator = get_preference_generator()
+        pairs = generator.generate_all()
+        output_path = generator.export_dpo_dataset(pairs=pairs)
+
+        return {
+            "status": "exported",
+            "count": len(pairs),
+            "path": str(output_path),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/training/dpo/run", tags=["Training"])
+async def trigger_dpo_training(force: bool = False):
+    """Manually trigger a DPO training run.
+
+    Args:
+        force: Skip minimum data requirements check
+    """
+    from javis.training.pipeline import TrainingPipeline
+    from javis.utils.config import get_config
+
+    config = get_config()
+
+    try:
+        pipeline = TrainingPipeline(config.training)
+        result = pipeline.run_dpo(force=force)
+
+        return {
+            "success": result.success,
+            "skipped": result.skipped,
+            "skip_reason": result.skip_reason,
+            "version": result.version,
+            "error": result.error,
+            "dataset_size": result.dataset_size,
+            "duration_seconds": result.duration_seconds,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/dpo/config", tags=["Training"])
+async def get_dpo_config():
+    """Get current DPO training configuration."""
+    from javis.utils.config import get_config
+
+    config = get_config()
+    dpo_config = config.training.dpo
+
+    return {
+        "enabled": dpo_config.enabled,
+        "beta": dpo_config.beta,
+        "loss_type": dpo_config.loss_type,
+        "min_preference_pairs": dpo_config.min_preference_pairs,
+        "use_reference_model": dpo_config.use_reference_model,
+        "reference_model": dpo_config.reference_model,
+        "max_prompt_length": dpo_config.max_prompt_length,
+        "max_response_length": dpo_config.max_response_length,
+    }
+
+
 # ==================== Tools API ====================
 
 @app.get("/api/tools", tags=["Tools"])

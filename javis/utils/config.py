@@ -126,6 +126,19 @@ class ABTestingConfig(BaseModel):
     significance_threshold: float = 0.95
 
 
+class DPOTrainingConfig(BaseModel):
+    """DPO (Direct Preference Optimization) training configuration."""
+
+    enabled: bool = False
+    beta: float = 0.1  # KL divergence weight
+    loss_type: str = "sigmoid"  # sigmoid, hinge, ipo
+    min_preference_pairs: int = 50
+    use_reference_model: bool = True
+    reference_model: str | None = None  # None means use base_model
+    max_prompt_length: int = 512
+    max_response_length: int = 1024
+
+
 class ToolsConfig(BaseModel):
     """Tools system configuration."""
 
@@ -279,6 +292,8 @@ class TrainingConfig(BaseModel):
     validation: TrainingValidationConfig = TrainingValidationConfig()
     metrics: TrainingMetricsConfig = TrainingMetricsConfig()
     ab_testing: ABTestingConfig = ABTestingConfig()
+    # Phase 6-5: DPO training
+    dpo: DPOTrainingConfig = DPOTrainingConfig()
 
 
 class AppConfig(BaseModel):
@@ -362,6 +377,8 @@ def load_config(config_path: str | Path | None = None) -> Config:
         validation=TrainingValidationConfig(**training_data.get("validation", {})),
         metrics=TrainingMetricsConfig(**training_data.get("metrics", {})),
         ab_testing=ABTestingConfig(**training_data.get("ab_testing", {})),
+        # Phase 6-5: DPO config
+        dpo=DPOTrainingConfig(**training_data.get("dpo", {})),
     )
 
     # Parse tools config if present

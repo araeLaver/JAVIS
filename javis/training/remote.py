@@ -222,6 +222,172 @@ if MODAL_AVAILABLE:
             "metadata": metadata,
         }
 
+    @app.function(
+        gpu="A10G",  # 24GB VRAM, ~$1.10/hr
+        image=training_image,
+        timeout=7200,  # 2 hours max
+        serialized=False,
+    )
+    def train_dpo_on_modal(preference_data_jsonl: str, config: dict) -> dict:
+        """Execute DPO training on Modal GPU.
+
+        Args:
+            preference_data_jsonl: JSONL string with preference data (prompt, chosen, rejected)
+            config: Training configuration dict
+
+        Returns:
+            dict with adapter files (base64 encoded) and metadata
+        """
+        import base64
+        import io
+        import json
+        import zipfile
+        from datetime import datetime
+
+        import torch
+        from datasets import Dataset
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from transformers import (
+            AutoModelForCausalLM,
+            AutoTokenizer,
+            BitsAndBytesConfig,
+        )
+        from trl import DPOConfig, DPOTrainer
+
+        print(f"Starting DPO training with config: {config}")
+        start_time = datetime.now()
+
+        # Parse preference data
+        preferences = []
+        for line in preference_data_jsonl.strip().split("\n"):
+            if line.strip():
+                preferences.append(json.loads(line))
+
+        print(f"Loaded {len(preferences)} preference pairs")
+
+        # Create dataset
+        dataset = Dataset.from_list(preferences)
+
+        # Load tokenizer
+        base_model = config.get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+        tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"  # DPO requires left padding
+
+        # Quantization config
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+
+        # Load model
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
+            use_cache=False,
+        )
+
+        # LoRA config
+        lora_config = LoraConfig(
+            r=config.get("lora_r", 64),
+            lora_alpha=config.get("lora_alpha", 16),
+            lora_dropout=0.05,
+            target_modules=[
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ],
+            task_type="CAUSAL_LM",
+            bias="none",
+        )
+
+        model = prepare_model_for_kbit_training(model)
+        model = get_peft_model(model, lora_config)
+
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Trainable: {trainable_params:,} / {total_params:,} params")
+
+        # DPO Training config
+        output_dir = "/tmp/javis-dpo-adapter"
+        dpo_config = DPOConfig(
+            output_dir=output_dir,
+            num_train_epochs=config.get("epochs", 1),
+            per_device_train_batch_size=config.get("batch_size", 2),
+            gradient_accumulation_steps=config.get("gradient_accumulation_steps", 4),
+            learning_rate=config.get("learning_rate", 5e-5),
+            beta=config.get("beta", 0.1),
+            loss_type=config.get("loss_type", "sigmoid"),
+            max_prompt_length=config.get("max_prompt_length", 512),
+            max_length=config.get("max_length", 1024),
+            warmup_ratio=0.1,
+            lr_scheduler_type="cosine",
+            logging_steps=10,
+            save_strategy="epoch",
+            bf16=True,
+            optim="paged_adamw_8bit",
+            gradient_checkpointing=True,
+            report_to="none",
+            remove_unused_columns=False,
+        )
+
+        # Train with DPO
+        trainer = DPOTrainer(
+            model=model,
+            args=dpo_config,
+            train_dataset=dataset,
+            processing_class=tokenizer,
+            peft_config=lora_config,
+        )
+
+        print("Starting DPO training...")
+        trainer.train()
+
+        # Save adapter
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+
+        # Create metadata
+        end_time = datetime.now()
+        metadata = {
+            "base_model": base_model,
+            "created_at": end_time.isoformat(),
+            "dataset_size": len(preferences),
+            "training_method": "dpo",
+            "training_config": config,
+            "duration_seconds": (end_time - start_time).total_seconds(),
+        }
+
+        with open(f"{output_dir}/metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        # Zip adapter files
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file_path in Path(output_dir).rglob("*"):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(output_dir)
+                    zf.write(file_path, arcname)
+
+        zip_buffer.seek(0)
+        adapter_zip_b64 = base64.b64encode(zip_buffer.read()).decode("utf-8")
+
+        print(f"DPO Training complete in {metadata['duration_seconds']:.1f}s")
+
+        return {
+            "success": True,
+            "adapter_zip_b64": adapter_zip_b64,
+            "metadata": metadata,
+        }
+
 
 class RemoteTrainer:
     """Remote training orchestrator."""
@@ -235,8 +401,8 @@ class RemoteTrainer:
         """Execute remote training and return results.
 
         Args:
-            data_path: Path to JSONL training data
-            config: Training configuration dict
+            data_path: Path to JSONL training data (SFT or DPO format)
+            config: Training configuration dict (include "method": "dpo" for DPO)
             output_dir: Where to save the adapter (default: models/v{timestamp})
 
         Returns:
@@ -268,15 +434,19 @@ class RemoteTrainer:
 
         start_time = datetime.now()
         version = f"v{start_time.strftime('%Y%m%d_%H%M%S')}"
+        is_dpo = config.get("method") == "dpo"
 
         try:
             # Read training data
             with open(data_path, "r", encoding="utf-8") as f:
                 training_data_jsonl = f.read()
 
-            # Call Modal function (disable output to avoid Windows encoding issues)
+            # Call appropriate Modal function based on training method
             with app.run():
-                result = train_on_modal.remote(training_data_jsonl, config)
+                if is_dpo:
+                    result = train_dpo_on_modal.remote(training_data_jsonl, config)
+                else:
+                    result = train_on_modal.remote(training_data_jsonl, config)
 
             if not result.get("success"):
                 return TrainingResult(
@@ -326,37 +496,68 @@ class RemoteTrainer:
     def _train_local(
         self, data_path: Path, config: dict, output_dir: Optional[Path] = None
     ) -> TrainingResult:
-        """Train on local GPU using existing finetune.py logic."""
+        """Train on local GPU using finetune.py or dpo_trainer.py."""
         import subprocess
         import sys
 
         start_time = datetime.now()
         version = f"v{start_time.strftime('%Y%m%d_%H%M%S')}"
+        is_dpo = config.get("method") == "dpo"
 
         if output_dir is None:
             output_dir = Path(__file__).parent.parent.parent / "models" / version
 
         try:
-            # Run finetune.py as subprocess
-            cmd = [
-                sys.executable,
-                "-m",
-                "javis.training.finetune",
-                "--data",
-                str(data_path),
-                "--output",
-                str(output_dir),
-                "--epochs",
-                str(config.get("epochs", 3)),
-                "--batch-size",
-                str(config.get("batch_size", 4)),
-                "--learning-rate",
-                str(config.get("learning_rate", 2e-4)),
-                "--lora-r",
-                str(config.get("lora_r", 64)),
-                "--lora-alpha",
-                str(config.get("lora_alpha", 16)),
-            ]
+            if is_dpo:
+                # Run DPO training
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "javis.training.dpo_trainer",
+                    "--data",
+                    str(data_path),
+                    "--output",
+                    str(output_dir),
+                    "--epochs",
+                    str(config.get("epochs", 1)),
+                    "--batch-size",
+                    str(config.get("batch_size", 2)),
+                    "--learning-rate",
+                    str(config.get("learning_rate", 5e-5)),
+                    "--beta",
+                    str(config.get("beta", 0.1)),
+                    "--loss-type",
+                    config.get("loss_type", "sigmoid"),
+                    "--lora-r",
+                    str(config.get("lora_r", 64)),
+                    "--lora-alpha",
+                    str(config.get("lora_alpha", 16)),
+                    "--max-prompt-length",
+                    str(config.get("max_prompt_length", 512)),
+                    "--max-length",
+                    str(config.get("max_length", 1024)),
+                ]
+            else:
+                # Run SFT training
+                cmd = [
+                    sys.executable,
+                    "-m",
+                    "javis.training.finetune",
+                    "--data",
+                    str(data_path),
+                    "--output",
+                    str(output_dir),
+                    "--epochs",
+                    str(config.get("epochs", 3)),
+                    "--batch-size",
+                    str(config.get("batch_size", 4)),
+                    "--learning-rate",
+                    str(config.get("learning_rate", 2e-4)),
+                    "--lora-r",
+                    str(config.get("lora_r", 64)),
+                    "--lora-alpha",
+                    str(config.get("lora_alpha", 16)),
+                ]
 
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
