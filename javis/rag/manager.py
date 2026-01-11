@@ -207,8 +207,13 @@ class RAGManager:
                 document_id=document_id
             )
 
-            # Convert to RetrievalResult
-            retrieval_results = []
+            if not results["ids"]:
+                return []
+
+            # Build chunks and collect document IDs (N+1 쿼리 방지)
+            chunks_data = []
+            document_ids = []
+
             for i, chunk_id in enumerate(results["ids"]):
                 distance = results["distances"][i]
                 score = 1 - distance  # cosine distance to similarity
@@ -217,19 +222,30 @@ class RAGManager:
                     continue
 
                 metadata = results["metadatas"][i]
+                doc_id = metadata.get("document_id", "")
 
                 chunk = DocumentChunk(
                     id=chunk_id,
-                    document_id=metadata.get("document_id", ""),
+                    document_id=doc_id,
                     content=results["documents"][i],
                     chunk_index=metadata.get("chunk_index", 0),
                     start_char=metadata.get("start_char", 0),
                     end_char=metadata.get("end_char", 0),
                 )
 
-                # Get document metadata
-                doc_data = self.store.get_document(chunk.document_id)
+                chunks_data.append((chunk, score, distance))
+                if doc_id:
+                    document_ids.append(doc_id)
+
+            # Batch fetch all documents at once (N+1 → 1 쿼리)
+            docs_map = self.store.get_documents_batch(document_ids)
+
+            # Build retrieval results
+            retrieval_results = []
+            for chunk, score, distance in chunks_data:
+                doc_data = docs_map.get(chunk.document_id)
                 document = None
+
                 if doc_data:
                     document = Document(
                         id=doc_data["id"],

@@ -64,6 +64,7 @@ voice = [
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
     "mypy>=1.7.0",
 ]
@@ -87,3 +88,52 @@ ignore = ["E501"]
 python_version = "3.11"
 warn_return_any = true
 warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--cov=javis --cov-report=term-missing --cov-report=html --cov-report=xml --cov-fail-under=35"
+
+[tool.coverage.run]
+source = ["javis"]
+branch = true
+omit = [
+    # Entry points
+    "*/javis/__main__.py",
+    "*/javis/interfaces/cli.py",
+    # Training modules (requires GPU/special setup)
+    "*/javis/training/pipeline.py",
+    "*/javis/training/trainer.py",
+    "*/javis/training/finetune.py",
+    "*/javis/training/manage.py",
+    "*/javis/training/remote.py",
+    # Model clients (requires API keys/GPU)
+    "*/javis/models/local_client.py",
+    "*/javis/models/modal_client.py",
+    # Voice modules (requires audio hardware)
+    "*/javis/voice/*.py",
+    "*/javis/voice/**/*.py",
+    # Workflow modules (complex scheduler)
+    "*/javis/workflows/*.py",
+    # External integrations (requires API keys)
+    "*/javis/integrations/*.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*Protocol:",
+]
+show_missing = true
+precision = 2
+
+[tool.coverage.html]
+directory = "htmlcov"

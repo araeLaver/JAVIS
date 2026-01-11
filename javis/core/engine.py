@@ -1,9 +1,11 @@
 """Chat engine with tool support for JAVIS."""
 
-import json
+from __future__ import annotations
+
 import logging
 import os
-from typing import Any, Optional
+import threading
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
@@ -11,64 +13,147 @@ from javis.models.client import Message, ChatResponse
 from javis.tools.registry import get_registry
 from javis.tools.executor import ToolExecutor
 from javis.utils.config import get_config
+from javis.utils.constants import (
+    GROQ_API_BASE_URL,
+    Timeouts,
+    Defaults,
+    Headers,
+    EnvVars,
+    Roles,
+    FinishReasons,
+)
+
+if TYPE_CHECKING:
+    from javis.memory.manager import MemoryManager
+    from javis.rag.manager import RAGManager
 
 logger = logging.getLogger(__name__)
 
-# Lazy imports for memory and RAG to avoid loading heavy dependencies at startup
-_memory_manager = None
-_rag_manager = None
 
+class ContextManagerRegistry:
+    """
+    Thread-safe singleton registry for context managers.
 
-def _get_memory_manager():
-    """Get memory manager with lazy loading."""
-    global _memory_manager
-    if _memory_manager is None:
+    Manages Memory and RAG managers with lazy loading pattern.
+    Uses double-checked locking to ensure thread safety during initialization.
+
+    Attributes:
+        memory_manager: Lazily loaded MemoryManager instance for long-term memory.
+        rag_manager: Lazily loaded RAGManager instance for document retrieval.
+
+    Example:
+        registry = get_context_registry()
+        if registry.memory_manager:
+            context = await registry.memory_manager.get_relevant_context(query)
+    """
+
+    _instance: Optional[ContextManagerRegistry] = None
+    _lock: threading.Lock = threading.Lock()
+    _memory_manager: Optional[MemoryManager]
+    _rag_manager: Optional[RAGManager]
+    _initialized: bool
+
+    def __new__(cls) -> ContextManagerRegistry:
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._memory_manager = None
+                    cls._instance._rag_manager = None
+                    cls._instance._initialized = False
+        return cls._instance
+
+    @property
+    def memory_manager(self) -> Optional[MemoryManager]:
+        """Memory manager를 lazy loading으로 반환합니다."""
+        if self._memory_manager is None:
+            with self._lock:
+                if self._memory_manager is None:
+                    self._memory_manager = self._init_memory_manager()
+        return self._memory_manager
+
+    @property
+    def rag_manager(self) -> Optional[RAGManager]:
+        """RAG manager를 lazy loading으로 반환합니다."""
+        if self._rag_manager is None:
+            with self._lock:
+                if self._rag_manager is None:
+                    self._rag_manager = self._init_rag_manager()
+        return self._rag_manager
+
+    def _init_memory_manager(self) -> Optional[MemoryManager]:
+        """Memory manager를 초기화합니다."""
         try:
             config = get_config()
             if config.memory.long_term.enabled:
                 from javis.memory import initialize_memory
-                _memory_manager = initialize_memory(
+                manager = initialize_memory(
                     db_path=config.memory.long_term.db_path,
                     collection_name=config.memory.long_term.collection_name,
                     embedding_model=config.memory.long_term.embedding_model
                 )
                 logger.info("Memory manager initialized")
+                return manager
         except Exception as e:
             logger.warning(f"Failed to initialize memory manager: {e}")
-    return _memory_manager
+        return None
 
-
-def _get_rag_manager():
-    """Get RAG manager with lazy loading."""
-    global _rag_manager
-    if _rag_manager is None:
+    def _init_rag_manager(self) -> Optional[RAGManager]:
+        """RAG manager를 초기화합니다."""
         try:
             config = get_config()
             if config.rag.enabled:
                 from javis.rag import initialize_rag
-                _rag_manager = initialize_rag(
+                manager = initialize_rag(
                     db_path=config.rag.db_path,
                     collection_name=config.rag.collection_name,
                     embedding_model=config.rag.embedding_model
                 )
                 logger.info("RAG manager initialized")
+                return manager
         except Exception as e:
             logger.warning(f"Failed to initialize RAG manager: {e}")
-    return _rag_manager
+        return None
+
+    def reset(self) -> None:
+        """테스트용: 레지스트리를 리셋합니다."""
+        with self._lock:
+            self._memory_manager = None
+            self._rag_manager = None
+            self._initialized = False
+
+
+def get_context_registry() -> ContextManagerRegistry:
+    """ContextManagerRegistry 싱글톤 인스턴스를 반환합니다."""
+    return ContextManagerRegistry()
 
 
 class ChatEngine:
-    """도구 통합 채팅 엔진.
+    """
+    Chat engine with integrated tool support.
 
-    Groq API와 도구 시스템을 연결하여 LLM이 도구를 호출할 수 있게 합니다.
+    Connects Groq API with the tool system to enable LLM tool calling.
+    Supports context enhancement through Memory and RAG systems.
+
+    Features:
+        - Multi-turn tool calling with automatic result injection
+        - Long-term memory integration for conversation context
+        - RAG-based document retrieval for knowledge augmentation
+        - Configurable timeouts and iteration limits
+
+    Example:
+        engine = ChatEngine(api_key="your-api-key")
+        response = await engine.chat_with_tools([
+            Message(role="user", content="What's the weather?")
+        ])
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "llama-3.1-8b-instant",
-        max_tool_iterations: int = 5,
-        tool_timeout: float = 30.0,
+        model: str = Defaults.MODEL_NAME,
+        max_tool_iterations: int = Defaults.MAX_TOOL_ITERATIONS,
+        tool_timeout: float = Timeouts.TOOL_EXECUTION,
         use_memory: bool = True,
         use_rag: bool = True
     ):
@@ -81,14 +166,14 @@ class ChatEngine:
             use_memory: 장기 기억 사용 여부
             use_rag: RAG 사용 여부
         """
-        self.api_key = api_key or os.getenv("GROQ_API_KEY")
+        self.api_key = api_key or os.getenv(EnvVars.GROQ_API_KEY)
         if not self.api_key:
-            raise ValueError("GROQ_API_KEY not found")
+            raise ValueError(f"{EnvVars.GROQ_API_KEY} not found")
 
         self.model = model
         self.max_tool_iterations = max_tool_iterations
         self.executor = ToolExecutor(timeout=tool_timeout)
-        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
+        self.base_url = GROQ_API_BASE_URL
         self.use_memory = use_memory
         self.use_rag = use_rag
 
@@ -119,11 +204,14 @@ class ChatEngine:
 
         # Search memory for relevant past conversations
         if self.use_memory:
-            memory_manager = _get_memory_manager()
+            registry = get_context_registry()
+            memory_manager = registry.memory_manager
             if memory_manager:
                 try:
                     memory_context = await memory_manager.get_relevant_context(
-                        user_query, limit=3, max_chars=500
+                        user_query,
+                        limit=Defaults.MEMORY_CONTEXT_LIMIT,
+                        max_chars=Defaults.MEMORY_MAX_CHARS
                     )
                     if memory_context:
                         context_parts.append(memory_context)
@@ -133,14 +221,15 @@ class ChatEngine:
 
         # Search RAG for relevant documents
         if self.use_rag:
-            rag_manager = _get_rag_manager()
+            registry = get_context_registry()
+            rag_manager = registry.rag_manager
             if rag_manager:
                 try:
                     config = get_config()
                     rag_context = await rag_manager.get_context_for_query(
                         user_query,
                         top_k=config.rag.top_k,
-                        max_chars=1000
+                        max_chars=Defaults.RAG_MAX_CHARS
                     )
                     if rag_context:
                         context_parts.append(rag_context)
@@ -175,12 +264,67 @@ class ChatEngine:
 
         return messages
 
+    def _build_api_payload(
+        self,
+        messages: list[dict],
+        tools: Optional[list],
+        temperature: float,
+        max_tokens: int
+    ) -> dict[str, Any]:
+        """API 요청 페이로드를 생성합니다."""
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        return payload
+
+    async def _call_groq_api(self, payload: dict[str, Any]) -> dict:
+        """Groq API를 호출합니다."""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                self.base_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=Timeouts.DEFAULT_API
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def _process_tool_calls(
+        self,
+        tool_calls: list[dict],
+        current_messages: list[dict]
+    ) -> None:
+        """도구 호출을 처리하고 결과를 메시지에 추가합니다."""
+        results = await self.executor.execute_parallel(tool_calls)
+
+        for call in tool_calls:
+            call_id = call["id"]
+            tool_name = call["function"]["name"]
+            result = results[call_id]
+
+            logger.info(f"Tool {tool_name} result: success={result.success}")
+
+            current_messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": result.to_message_content()
+            })
+
     async def chat_with_tools(
         self,
         messages: list[Message],
         use_tools: bool = True,
-        temperature: float = 0.7,
-        max_tokens: int = 2048
+        temperature: float = Defaults.TEMPERATURE,
+        max_tokens: int = Defaults.MAX_TOKENS
     ) -> ChatResponse:
         """
         도구를 사용한 채팅.
@@ -194,70 +338,47 @@ class ChatEngine:
         Returns:
             최종 ChatResponse
         """
-        registry = get_registry()
-
         # 도구 스키마 준비
         tools = None
         if use_tools:
+            registry = get_registry()
             tools = registry.get_openai_tools()
             if not tools:
                 logger.warning("No tools enabled, proceeding without tools")
-                tools = None
 
-        iteration = 0
-        # Message 객체를 dict로 변환
+        # Message 객체를 dict로 변환 및 컨텍스트 강화
         current_messages = [
             {"role": m.role, "content": m.content}
             for m in messages
         ]
-
-        # Memory/RAG 컨텍스트로 메시지 강화
         current_messages = await self._enhance_with_context(current_messages)
 
-        total_tool_calls = 0
-
-        while iteration < self.max_tool_iterations:
-            iteration += 1
-
-            # API 요청 페이로드
-            payload: dict[str, Any] = {
-                "model": self.model,
-                "messages": current_messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            }
-
-            if tools:
-                payload["tools"] = tools
-                payload["tool_choice"] = "auto"
-
-            logger.debug(f"Tool iteration {iteration}, payload keys: {payload.keys()}")
+        # 도구 호출 루프
+        for iteration in range(1, self.max_tool_iterations + 1):
+            payload = self._build_api_payload(
+                current_messages, tools, temperature, max_tokens
+            )
+            logger.debug(f"Tool iteration {iteration}")
 
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        self.base_url,
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=payload,
-                        timeout=60.0
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-
+                data = await self._call_groq_api(payload)
             except httpx.HTTPStatusError as e:
-                logger.error(f"Groq API error: {e.response.status_code} - {e.response.text}")
+                logger.error(f"Groq API error: {e.response.status_code}")
                 return ChatResponse(
                     content=f"API 오류가 발생했습니다: {e.response.status_code}",
-                    finish_reason="error"
+                    finish_reason=FinishReasons.ERROR
+                )
+            except httpx.TimeoutException:
+                logger.error("Groq API timeout")
+                return ChatResponse(
+                    content="API 요청 시간이 초과되었습니다.",
+                    finish_reason=FinishReasons.ERROR
                 )
             except Exception as e:
                 logger.exception("Unexpected error in chat_with_tools")
                 return ChatResponse(
                     content=f"오류가 발생했습니다: {str(e)}",
-                    finish_reason="error"
+                    finish_reason=FinishReasons.ERROR
                 )
 
             choice = data["choices"][0]
@@ -272,44 +393,24 @@ class ChatEngine:
                 )
 
             # 도구 호출 처리
-            logger.info(f"Processing {len(message['tool_calls'])} tool calls")
-
-            # assistant 메시지 추가 (tool_calls 포함)
-            current_messages.append(message)
-
             tool_calls = message["tool_calls"]
-            total_tool_calls += len(tool_calls)
+            logger.info(f"Processing {len(tool_calls)} tool calls")
 
-            # 도구 실행
-            results = await self.executor.execute_parallel(tool_calls)
-
-            # 도구 결과를 메시지에 추가
-            for call in tool_calls:
-                call_id = call["id"]
-                tool_name = call["function"]["name"]
-                result = results[call_id]
-
-                logger.info(f"Tool {tool_name} result: success={result.success}")
-
-                # 도구 결과 메시지 추가
-                current_messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": result.to_message_content()
-                })
+            current_messages.append(message)
+            await self._process_tool_calls(tool_calls, current_messages)
 
         # 최대 반복 횟수 도달
         logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
         return ChatResponse(
-            content=f"도구 호출이 최대 횟수({self.max_tool_iterations})에 도달했습니다. 일부 작업이 완료되지 않았을 수 있습니다.",
-            finish_reason="max_iterations"
+            content=f"도구 호출이 최대 횟수({self.max_tool_iterations})에 도달했습니다.",
+            finish_reason=FinishReasons.MAX_ITERATIONS
         )
 
     async def chat_simple(
         self,
         messages: list[Message],
-        temperature: float = 0.7,
-        max_tokens: int = 2048
+        temperature: float = Defaults.TEMPERATURE,
+        max_tokens: int = Defaults.MAX_TOKENS
     ) -> ChatResponse:
         """
         도구 없이 단순 채팅.
@@ -341,7 +442,7 @@ class ChatEngine:
                         "Content-Type": "application/json",
                     },
                     json=payload,
-                    timeout=60.0
+                    timeout=Timeouts.DEFAULT_API
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -357,7 +458,7 @@ class ChatEngine:
             logger.exception("Error in chat_simple")
             return ChatResponse(
                 content=f"오류가 발생했습니다: {str(e)}",
-                finish_reason="error"
+                finish_reason=FinishReasons.ERROR
             )
 
     async def store_conversation_to_memory(
@@ -380,7 +481,8 @@ class ChatEngine:
         if not self.use_memory:
             return False
 
-        memory_manager = _get_memory_manager()
+        registry = get_context_registry()
+        memory_manager = registry.memory_manager
         if not memory_manager:
             return False
 

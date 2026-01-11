@@ -1,12 +1,77 @@
 """File operation tools for JAVIS."""
 
-import os
+import logging
 from pathlib import Path
 from typing import Optional
 
 import aiofiles
 
 from javis.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+
+logger = logging.getLogger(__name__)
+
+
+class PathSecurityError(Exception):
+    """경로 보안 검사 실패 예외."""
+    pass
+
+
+def validate_path_security(
+    path: Path,
+    allowed_dirs: list[Path],
+    check_exists: bool = True,
+    allow_symlinks: bool = False
+) -> tuple[bool, str, Path]:
+    """
+    경로 보안을 검증합니다.
+
+    Args:
+        path: 검증할 경로
+        allowed_dirs: 허용된 디렉토리 목록
+        check_exists: 존재 여부 확인 (파일 쓰기 시 False)
+        allow_symlinks: 심볼릭 링크 허용 여부
+
+    Returns:
+        (성공여부, 에러메시지, 해석된 경로)
+    """
+    try:
+        # 1. 경로 정규화 (심볼릭 링크 해석 포함)
+        resolved = path.resolve(strict=False)
+
+        # 2. 심볼릭 링크 검사
+        if not allow_symlinks and path.exists():
+            if path.is_symlink():
+                logger.warning(f"Symlink access blocked: {path}")
+                return False, "Symbolic links are not allowed for security reasons", resolved
+
+        # 3. 허용된 디렉토리 내에 있는지 확인
+        is_allowed = False
+        for allowed in allowed_dirs:
+            allowed_resolved = allowed.resolve(strict=False)
+            try:
+                resolved.relative_to(allowed_resolved)
+                is_allowed = True
+                break
+            except ValueError:
+                continue
+
+        if not is_allowed:
+            allowed_str = ', '.join(str(d) for d in allowed_dirs)
+            logger.warning(f"Path outside allowed directories: {path} -> {resolved}")
+            return False, f"Access denied: Path not in allowed directories ({allowed_str})", resolved
+
+        # 4. 존재 여부 확인 (선택적)
+        if check_exists and not resolved.exists():
+            return False, f"Path not found: {path}", resolved
+
+        return True, "", resolved
+
+    except OSError as e:
+        logger.error(f"Path validation OS error: {path} - {e}")
+        return False, f"Invalid path: {e}", path
+    except Exception as e:
+        logger.error(f"Path validation error: {path} - {e}")
+        return False, "Path validation failed", path
 
 
 class ReadFileTool(BaseTool):
@@ -43,47 +108,21 @@ class ReadFileTool(BaseTool):
             ]
         )
 
-    def _is_path_allowed(self, path: Path) -> bool:
-        """경로 보안 검사."""
-        try:
-            resolved = path.resolve()
-            for allowed in self.ALLOWED_DIRS:
-                allowed_resolved = allowed.resolve()
-                try:
-                    resolved.relative_to(allowed_resolved)
-                    return True
-                except ValueError:
-                    continue
-            return False
-        except Exception:
-            return False
-
     async def execute(self, path: str, encoding: str = "utf-8") -> ToolResult:
         file_path = Path(path)
 
-        # 경로 순회 공격 방지
-        if ".." in str(file_path):
-            return ToolResult(
-                success=False,
-                output=None,
-                error="Path traversal not allowed"
-            )
+        # 통합 보안 검사
+        is_valid, error_msg, resolved_path = validate_path_security(
+            file_path,
+            self.ALLOWED_DIRS,
+            check_exists=True,
+            allow_symlinks=False
+        )
 
-        if not self._is_path_allowed(file_path):
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"Access denied: Path not in allowed directories ({', '.join(str(d) for d in self.ALLOWED_DIRS)})"
-            )
+        if not is_valid:
+            return ToolResult(success=False, output=None, error=error_msg)
 
-        if not file_path.exists():
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"File not found: {path}"
-            )
-
-        if not file_path.is_file():
+        if not resolved_path.is_file():
             return ToolResult(
                 success=False,
                 output=None,
@@ -91,15 +130,19 @@ class ReadFileTool(BaseTool):
             )
 
         # 파일 크기 검사
-        if file_path.stat().st_size > self.MAX_FILE_SIZE:
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"File too large (max {self.MAX_FILE_SIZE // 1024}KB)"
-            )
+        try:
+            file_size = resolved_path.stat().st_size
+            if file_size > self.MAX_FILE_SIZE:
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=f"File too large (max {self.MAX_FILE_SIZE // 1024}KB)"
+                )
+        except OSError as e:
+            return ToolResult(success=False, output=None, error=f"Cannot access file: {e}")
 
         try:
-            async with aiofiles.open(file_path, 'r', encoding=encoding) as f:
+            async with aiofiles.open(resolved_path, 'r', encoding=encoding) as f:
                 content = await f.read()
             return ToolResult(
                 success=True,
@@ -115,8 +158,9 @@ class ReadFileTool(BaseTool):
                 output=None,
                 error=f"Cannot decode file with encoding: {encoding}"
             )
-        except Exception as e:
-            return ToolResult(success=False, output=None, error=str(e))
+        except OSError as e:
+            logger.error(f"File read error: {resolved_path} - {e}")
+            return ToolResult(success=False, output=None, error=f"Cannot read file: {e}")
 
 
 class WriteFileTool(BaseTool):
@@ -155,26 +199,6 @@ class WriteFileTool(BaseTool):
             ]
         )
 
-    def _is_path_allowed(self, path: Path) -> bool:
-        """경로 보안 검사."""
-        try:
-            # 부모 디렉토리 기준으로 검사 (파일이 아직 없을 수 있음)
-            parent = path.parent.resolve()
-            for allowed in self.ALLOWED_DIRS:
-                allowed_resolved = allowed.resolve()
-                try:
-                    parent.relative_to(allowed_resolved)
-                    return True
-                except ValueError:
-                    continue
-
-                # 또는 parent가 allowed와 같거나 하위인지 확인
-                if parent == allowed_resolved or allowed_resolved in parent.parents:
-                    return True
-            return False
-        except Exception:
-            return False
-
     async def execute(
         self,
         path: str,
@@ -191,27 +215,32 @@ class WriteFileTool(BaseTool):
 
         file_path = Path(path)
 
-        # 경로 순회 공격 방지
-        if ".." in str(file_path):
-            return ToolResult(
-                success=False,
-                output=None,
-                error="Path traversal not allowed"
-            )
+        # 통합 보안 검사 (파일이 아직 없을 수 있으므로 check_exists=False)
+        is_valid, error_msg, resolved_path = validate_path_security(
+            file_path,
+            self.ALLOWED_DIRS,
+            check_exists=False,
+            allow_symlinks=False
+        )
 
-        if not self._is_path_allowed(file_path):
+        if not is_valid:
+            return ToolResult(success=False, output=None, error=error_msg)
+
+        # 기존 파일이 심볼릭 링크인지 확인
+        if file_path.exists() and file_path.is_symlink():
+            logger.warning(f"Attempted write to symlink: {file_path}")
             return ToolResult(
                 success=False,
                 output=None,
-                error=f"Access denied: Path not in allowed directories ({', '.join(str(d) for d in self.ALLOWED_DIRS)})"
+                error="Cannot write to symbolic links"
             )
 
         try:
             # 디렉토리 생성
-            file_path.parent.mkdir(parents=True, exist_ok=True)
+            resolved_path.parent.mkdir(parents=True, exist_ok=True)
 
             mode = 'a' if append else 'w'
-            async with aiofiles.open(file_path, mode, encoding='utf-8') as f:
+            async with aiofiles.open(resolved_path, mode, encoding='utf-8') as f:
                 await f.write(content)
 
             return ToolResult(
@@ -222,8 +251,12 @@ class WriteFileTool(BaseTool):
                     "mode": "append" if append else "write"
                 }
             )
-        except Exception as e:
-            return ToolResult(success=False, output=None, error=str(e))
+        except PermissionError as e:
+            logger.error(f"Permission denied writing to: {resolved_path}")
+            return ToolResult(success=False, output=None, error="Permission denied")
+        except OSError as e:
+            logger.error(f"File write error: {resolved_path} - {e}")
+            return ToolResult(success=False, output=None, error=f"Cannot write file: {e}")
 
 
 class ListDirectoryTool(BaseTool):
@@ -259,24 +292,6 @@ class ListDirectoryTool(BaseTool):
             ]
         )
 
-    def _is_path_allowed(self, path: Path) -> bool:
-        """경로 보안 검사."""
-        try:
-            resolved = path.resolve()
-            for allowed in self.ALLOWED_DIRS:
-                allowed_resolved = allowed.resolve()
-                try:
-                    resolved.relative_to(allowed_resolved)
-                    return True
-                except ValueError:
-                    pass
-                # 정확히 일치하는 경우
-                if resolved == allowed_resolved:
-                    return True
-            return False
-        except Exception:
-            return False
-
     async def execute(
         self,
         path: str = "./workspace",
@@ -284,29 +299,18 @@ class ListDirectoryTool(BaseTool):
     ) -> ToolResult:
         dir_path = Path(path)
 
-        # 경로 순회 공격 방지
-        if ".." in str(dir_path):
-            return ToolResult(
-                success=False,
-                output=None,
-                error="Path traversal not allowed"
-            )
+        # 통합 보안 검사
+        is_valid, error_msg, resolved_path = validate_path_security(
+            dir_path,
+            self.ALLOWED_DIRS,
+            check_exists=True,
+            allow_symlinks=False
+        )
 
-        if not self._is_path_allowed(dir_path):
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"Access denied: Path not in allowed directories"
-            )
+        if not is_valid:
+            return ToolResult(success=False, output=None, error=error_msg)
 
-        if not dir_path.exists():
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"Directory not found: {path}"
-            )
-
-        if not dir_path.is_dir():
+        if not resolved_path.is_dir():
             return ToolResult(
                 success=False,
                 output=None,
@@ -317,26 +321,39 @@ class ListDirectoryTool(BaseTool):
             files = []
 
             if recursive:
-                for item in dir_path.rglob("*"):
-                    if item.is_file():
-                        files.append({
-                            "name": str(item.relative_to(dir_path)),
-                            "type": "file",
-                            "size": item.stat().st_size
-                        })
-                    elif item.is_dir():
-                        files.append({
-                            "name": str(item.relative_to(dir_path)),
-                            "type": "directory",
-                            "size": None
-                        })
+                for item in resolved_path.rglob("*"):
+                    # 심볼릭 링크 건너뛰기
+                    if item.is_symlink():
+                        continue
+                    try:
+                        if item.is_file():
+                            files.append({
+                                "name": str(item.relative_to(resolved_path)),
+                                "type": "file",
+                                "size": item.stat().st_size
+                            })
+                        elif item.is_dir():
+                            files.append({
+                                "name": str(item.relative_to(resolved_path)),
+                                "type": "directory",
+                                "size": None
+                            })
+                    except OSError:
+                        # 접근 불가 파일 건너뛰기
+                        continue
             else:
-                for item in dir_path.iterdir():
-                    files.append({
-                        "name": item.name,
-                        "type": "directory" if item.is_dir() else "file",
-                        "size": item.stat().st_size if item.is_file() else None
-                    })
+                for item in resolved_path.iterdir():
+                    # 심볼릭 링크 건너뛰기
+                    if item.is_symlink():
+                        continue
+                    try:
+                        files.append({
+                            "name": item.name,
+                            "type": "directory" if item.is_dir() else "file",
+                            "size": item.stat().st_size if item.is_file() else None
+                        })
+                    except OSError:
+                        continue
 
             return ToolResult(
                 success=True,
@@ -346,8 +363,11 @@ class ListDirectoryTool(BaseTool):
                     "files": sorted(files, key=lambda x: (x["type"] == "file", x["name"]))
                 }
             )
-        except Exception as e:
-            return ToolResult(success=False, output=None, error=str(e))
+        except PermissionError:
+            return ToolResult(success=False, output=None, error="Permission denied")
+        except OSError as e:
+            logger.error(f"Directory listing error: {resolved_path} - {e}")
+            return ToolResult(success=False, output=None, error=f"Cannot list directory: {e}")
 
 
 def register_file_tools() -> None:

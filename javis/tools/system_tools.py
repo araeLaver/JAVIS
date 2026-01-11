@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from javis.tools.base import BaseTool, ToolDefinition, ToolParameter, ToolResult
+from javis.utils.constants import Sizes
 
 
 class SystemInfoTool(BaseTool):
@@ -33,13 +34,13 @@ class SystemInfoTool(BaseTool):
                 "cpu_count_physical": psutil.cpu_count(logical=False),
                 "cpu_percent": psutil.cpu_percent(interval=0.1),
                 "memory": {
-                    "total_gb": round(psutil.virtual_memory().total / (1024**3), 2),
-                    "available_gb": round(psutil.virtual_memory().available / (1024**3), 2),
+                    "total_gb": round(psutil.virtual_memory().total / Sizes.BYTES_PER_GB, 2),
+                    "available_gb": round(psutil.virtual_memory().available / Sizes.BYTES_PER_GB, 2),
                     "used_percent": psutil.virtual_memory().percent
                 },
                 "disk": {
-                    "total_gb": round(psutil.disk_usage('/').total / (1024**3), 2),
-                    "free_gb": round(psutil.disk_usage('/').free / (1024**3), 2),
+                    "total_gb": round(psutil.disk_usage('/').total / Sizes.BYTES_PER_GB, 2),
+                    "free_gb": round(psutil.disk_usage('/').free / Sizes.BYTES_PER_GB, 2),
                     "used_percent": psutil.disk_usage('/').percent
                 },
                 "current_time": datetime.now().isoformat()

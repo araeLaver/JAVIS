@@ -173,11 +173,9 @@ class ModalInferenceClient:
         print(f"Adapter loaded: {len(self._adapter_weights_b64)} bytes")
 
     def chat(self, messages: list[Message]) -> ChatResponse:
-        """Generate chat response using Modal."""
-        # Convert messages to dicts
+        """Generate chat response using Modal (synchronous)."""
         messages_dict = [{"role": m.role, "content": m.content} for m in messages]
 
-        # Call Modal function
         with inference_app.run():
             result = run_inference.remote(
                 messages=messages_dict,
@@ -190,12 +188,33 @@ class ModalInferenceClient:
             usage=result.get("usage", {}),
         )
 
+    def _chat_sync(self, messages_dict: list[dict]) -> dict:
+        """Internal sync method for Modal inference."""
+        with inference_app.run():
+            return run_inference.remote(
+                messages=messages_dict,
+                adapter_weights_b64=self._adapter_weights_b64,
+            )
+
     async def chat_async(self, messages: list[Message]) -> ChatResponse:
-        """Async chat (runs sync in thread)."""
+        """
+        Async chat using asyncio.to_thread for proper non-blocking execution.
+
+        Uses asyncio.to_thread (Python 3.9+) which is the recommended way
+        to run blocking code in async context.
+        """
         import asyncio
 
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.chat, messages)
+        messages_dict = [{"role": m.role, "content": m.content} for m in messages]
+
+        # Use asyncio.to_thread for proper non-blocking execution
+        result = await asyncio.to_thread(self._chat_sync, messages_dict)
+
+        return ChatResponse(
+            content=result["content"],
+            finish_reason=result.get("finish_reason", "stop"),
+            usage=result.get("usage", {}),
+        )
 
 
 def get_latest_adapter_path() -> Optional[str]:

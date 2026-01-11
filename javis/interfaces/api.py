@@ -1,5 +1,7 @@
 """FastAPI server for JAVIS web interface."""
 
+import functools
+import logging
 import os
 import aiofiles
 from contextlib import asynccontextmanager
@@ -9,9 +11,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Callable, List, Optional, TypeVar
+
+# Type variable for generic decorator
+T = TypeVar("T")
+
+api_logger = logging.getLogger(__name__)
 
 from javis.utils.config import load_config, get_config
+from javis.utils.constants import DEFAULT_CORS_ORIGINS, EnvVars
 from javis.models.client import ModelClient, Message
 from javis.models.local_client import (
     LocalModelClient,
@@ -38,6 +46,68 @@ from javis.tools import initialize_tools
 # 업로드 디렉토리
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# --- Error Handling Decorators ---
+
+def handle_api_errors(func: Callable[..., T]) -> Callable[..., T]:
+    """
+    API 엔드포인트의 공통 에러 핸들링 데코레이터.
+
+    - HTTPException은 그대로 전달
+    - ValueError -> 400 Bad Request
+    - FileNotFoundError -> 404 Not Found
+    - PermissionError -> 403 Forbidden
+    - 기타 예외 -> 500 Internal Server Error (상세 로깅)
+    """
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except HTTPException:
+            raise
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except Exception as e:
+            api_logger.exception(f"Unexpected error in {func.__name__}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Internal server error: {type(e).__name__}"
+            )
+    return wrapper
+
+
+def require_feature(feature_path: str, error_message: str = None):
+    """
+    특정 기능이 활성화되어 있는지 확인하는 데코레이터.
+
+    Args:
+        feature_path: 설정 경로 (예: "memory.long_term.enabled", "rag.enabled")
+        error_message: 비활성화 시 표시할 에러 메시지
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            config = get_config()
+
+            # 설정 경로를 따라가며 값 확인
+            value = config
+            for attr in feature_path.split("."):
+                value = getattr(value, attr, None)
+                if value is None:
+                    break
+
+            if not value:
+                msg = error_message or f"Feature '{feature_path}' is not enabled"
+                raise HTTPException(status_code=400, detail=msg)
+
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 # Session storage (in-memory, 프로덕션에서는 Redis 등 사용)
@@ -97,20 +167,95 @@ async def lifespan(app: FastAPI):
     sessions.clear()
 
 
+# API Tags for documentation organization
+tags_metadata = [
+    {
+        "name": "Chat",
+        "description": "Chat endpoints for conversing with JAVIS",
+    },
+    {
+        "name": "Session",
+        "description": "Session management endpoints",
+    },
+    {
+        "name": "Models",
+        "description": "Model and adapter management",
+    },
+    {
+        "name": "Memory",
+        "description": "Long-term memory system",
+    },
+    {
+        "name": "RAG",
+        "description": "Retrieval-Augmented Generation for document knowledge",
+    },
+    {
+        "name": "Training",
+        "description": "Model training and fine-tuning endpoints",
+    },
+    {
+        "name": "Tools",
+        "description": "Tool system endpoints",
+    },
+    {
+        "name": "Voice",
+        "description": "Voice interface (STT/TTS)",
+    },
+    {
+        "name": "Workflows",
+        "description": "Workflow automation",
+    },
+    {
+        "name": "Health",
+        "description": "Health check and status endpoints",
+    },
+]
+
 app = FastAPI(
     title="JAVIS API",
-    description="Personal AI Assistant API",
+    description="""
+## JAVIS - Personal AI Assistant API
+
+JAVIS is a personal AI assistant with custom fine-tuned models and integrated tool support.
+
+### Features
+- **Multi-model support**: Groq (cloud), Modal (serverless GPU), Local (fine-tuned)
+- **Tool integration**: File operations, web search, calendar, Slack, Notion
+- **Long-term memory**: Conversation history with semantic search
+- **RAG system**: Document knowledge base with vector search
+- **Voice interface**: Speech-to-text and text-to-speech
+- **Workflow automation**: Scheduled tasks and triggers
+
+### Authentication
+Currently no authentication is required. For production, configure CORS and add API key authentication.
+""",
     version="0.1.0",
     lifespan=lifespan,
+    openapi_tags=tags_metadata,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
-# CORS 설정 (모든 도메인 허용 - 프로덕션에서는 제한 필요)
+# CORS 설정 - 환경변수로 허용 도메인 관리
+# CORS_ORIGINS 환경변수: 쉼표로 구분된 도메인 목록 (예: "https://example.com,https://app.example.com")
+# 설정하지 않으면 개발 환경용 기본값 사용
+def _get_cors_origins() -> list[str]:
+    """환경변수에서 CORS 허용 도메인 목록을 가져옵니다."""
+    origins_env = os.getenv(EnvVars.CORS_ORIGINS, "").strip()
+    if origins_env:
+        return [origin.strip() for origin in origins_env.split(",") if origin.strip()]
+    # 개발 환경 기본값 (프로덕션에서는 반드시 CORS_ORIGINS 설정 필요)
+    return DEFAULT_CORS_ORIGINS.copy()
+
+_cors_origins = _get_cors_origins()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Session-ID"],
 )
 
 
@@ -190,105 +335,227 @@ async def root():
     return {"message": "JAVIS API is running", "docs": "/docs"}
 
 
-@app.get("/health")
+@app.get("/health", tags=["Health"])
 async def health():
-    """Health check endpoint."""
+    """Simple health check endpoint.
+
+    Returns a basic health status. For detailed status, use `/api/status`.
+    """
     return {"status": "healthy"}
 
 
-@app.post("/api/chat", response_model=ChatResponse)
+@app.get("/api/status", tags=["Health"])
+async def get_system_status():
+    """Get detailed system status.
+
+    Returns comprehensive status of all JAVIS subsystems including:
+    - API key availability
+    - Memory system status
+    - RAG system status
+    - Tool system status
+    - Training scheduler status
+    - Voice system status
+    - Workflow scheduler status
+    """
+    import sys
+    from datetime import datetime
+
+    config = get_config()
+
+    status = {
+        "timestamp": datetime.now().isoformat(),
+        "version": "0.1.0",
+        "python_version": sys.version,
+        "components": {
+            "groq": {
+                "available": bool(config.groq_api_key),
+                "model": "llama-3.1-8b-instant",
+            },
+            "modal": {
+                "available": check_modal_available(),
+            },
+            "local_model": {
+                "loaded": _local_client is not None and getattr(_local_client, '_loaded', False),
+                "adapter": _local_client.adapter_path if _local_client else None,
+            },
+            "tools": {
+                "enabled": config.tools.enabled,
+                "count": len(config.tools.available) if config.tools.enabled else 0,
+            },
+            "memory": {
+                "enabled": config.memory.long_term.enabled,
+            },
+            "rag": {
+                "enabled": config.rag.enabled,
+            },
+            "voice": {
+                "enabled": config.voice.enabled,
+            },
+            "workflows": {
+                "enabled": config.workflows.enabled,
+            },
+            "training_scheduler": {
+                "available": SCHEDULER_AVAILABLE,
+                "running": get_scheduler().get_status().running if SCHEDULER_AVAILABLE and get_scheduler() else False,
+            },
+        },
+        "sessions": {
+            "active_count": len(sessions),
+        },
+    }
+
+    return status
+
+
+@app.get("/api/ready", tags=["Health"])
+async def readiness_check():
+    """Kubernetes-style readiness probe.
+
+    Returns 200 if the service is ready to accept traffic,
+    503 if not ready (e.g., still initializing).
+    """
+    config = get_config()
+
+    # Check if at least one model backend is available
+    groq_ready = bool(config.groq_api_key)
+    modal_ready = check_modal_available()
+    local_ready = _local_client is not None and getattr(_local_client, '_loaded', False)
+
+    if groq_ready or modal_ready or local_ready:
+        return {
+            "ready": True,
+            "backends": {
+                "groq": groq_ready,
+                "modal": modal_ready,
+                "local": local_ready,
+            }
+        }
+
+    from fastapi import HTTPException
+    raise HTTPException(
+        status_code=503,
+        detail="No model backend available"
+    )
+
+
+# --- Model Handlers (chat 엔드포인트 리팩토링) ---
+
+async def _handle_modal_chat(
+    messages: list[Message],
+    adapter_version: Optional[str]
+) -> tuple[Any, str]:
+    """Modal.com GPU를 통한 파인튜닝 모델 추론."""
+    modal_client = get_modal_client(adapter_version)
+    modal_messages = [
+        ModalMessage(role=m.role, content=m.content) for m in messages
+    ]
+    response = await modal_client.chat_async(modal_messages)
+    return response, "modal"
+
+
+async def _handle_local_chat(
+    messages: list[Message],
+    adapter_version: Optional[str]
+) -> tuple[Any, str]:
+    """로컬 GPU를 통한 파인튜닝 모델 추론."""
+    local_client = get_local_client(adapter_version)
+    local_messages = [
+        LocalMessage(role=m.role, content=m.content) for m in messages
+    ]
+    response = await local_client.chat_async(local_messages)
+    return response, "local"
+
+
+async def _handle_groq_chat(
+    messages: list[Message],
+    use_tools: bool,
+    config
+) -> tuple[Any, str, bool]:
+    """Groq API를 통한 추론."""
+    if not config.groq_api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Groq API key not configured"
+        )
+
+    tools_used = False
+
+    if use_tools and config.tools.enabled:
+        engine = ChatEngine()
+        response = await engine.chat_with_tools(messages)
+        tools_used = True
+    else:
+        client = ModelClient()
+        response = await client.chat(messages)
+
+    return response, "groq", tools_used
+
+
+def _trim_session_history(
+    session_id: str,
+    messages: list[Message],
+    max_history: int
+) -> None:
+    """세션 히스토리를 최대 길이로 제한."""
+    if len(messages) > max_history + 1:
+        sessions[session_id] = [messages[0]] + messages[-(max_history):]
+
+
+@app.post("/api/chat", response_model=ChatResponse, tags=["Chat"])
+@handle_api_errors
 async def chat(request: ChatRequest):
     """Chat with JAVIS.
 
-    Models:
-    - groq: Fast inference via Groq API (Llama 3.1)
-    - modal: Fine-tuned model via Modal.com GPU (recommended)
-    - local: Fine-tuned model on local GPU (requires CUDA)
+    Send a message and receive an AI response. Supports multiple model backends.
+
+    **Models:**
+    - `groq`: Fast inference via Groq API (Llama 3.1)
+    - `modal`: Fine-tuned model via Modal.com GPU (recommended)
+    - `local`: Fine-tuned model on local GPU (requires CUDA)
+
+    **Tool Usage:**
+    Set `use_tools=true` to enable tool calling (Groq only).
     """
     config = get_config()
-    logger = get_logger()
+    conv_logger = get_logger()
 
-    try:
-        # 세션 가져오기
-        messages = get_or_create_session(request.session_id)
+    # 세션 및 메시지 준비
+    messages = get_or_create_session(request.session_id)
+    messages.append(Message(role="user", content=request.message))
+    conv_logger.add_turn(request.session_id, "user", request.message)
 
-        # 사용자 메시지 추가
-        messages.append(Message(role="user", content=request.message))
+    # 모델별 핸들러 호출
+    tools_used = False
 
-        # 대화 로깅 (파인튜닝 데이터 수집)
-        logger.add_turn(request.session_id, "user", request.message)
-
-        # 모델 선택 및 호출
-        if request.model == "modal":
-            # Modal.com GPU를 통한 파인튜닝 모델 추론
-            modal_client = get_modal_client(request.adapter_version)
-
-            # Message 타입 변환
-            modal_messages = [
-                ModalMessage(role=m.role, content=m.content) for m in messages
-            ]
-
-            response = await modal_client.chat_async(modal_messages)
-            model_used = "modal"
-
-        elif request.model == "local":
-            # 로컬 GPU를 통한 파인튜닝 모델 추론
-            local_client = get_local_client(request.adapter_version)
-
-            # Message 타입 변환
-            local_messages = [
-                LocalMessage(role=m.role, content=m.content) for m in messages
-            ]
-
-            response = await local_client.chat_async(local_messages)
-            model_used = "local"
-
-        else:  # groq (default)
-            # Groq API 사용
-            if not config.groq_api_key:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Groq API key not configured"
-                )
-
-            tools_used = False
-
-            # 도구 사용 요청 시 ChatEngine 사용
-            if request.use_tools and config.tools.enabled:
-                engine = ChatEngine()
-                response = await engine.chat_with_tools(messages)
-                tools_used = True
-            else:
-                client = ModelClient()
-                response = await client.chat(messages)
-
-            model_used = "groq"
-
-        # 어시스턴트 응답 추가
-        messages.append(Message(role="assistant", content=response.content))
-
-        # 어시스턴트 응답 로깅
-        logger.add_turn(request.session_id, "assistant", response.content)
-
-        # 히스토리 제한
-        max_history = config.conversation.max_history
-        if len(messages) > max_history + 1:
-            sessions[request.session_id] = [messages[0]] + messages[-(max_history):]
-
-        return ChatResponse(
-            response=response.content,
-            session_id=request.session_id,
-            model_used=model_used,
-            tools_used=tools_used if request.model == "groq" else False
+    if request.model == "modal":
+        response, model_used = await _handle_modal_chat(
+            messages, request.adapter_version
+        )
+    elif request.model == "local":
+        response, model_used = await _handle_local_chat(
+            messages, request.adapter_version
+        )
+    else:
+        response, model_used, tools_used = await _handle_groq_chat(
+            messages, request.use_tools, config
         )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # 응답 처리
+    messages.append(Message(role="assistant", content=response.content))
+    conv_logger.add_turn(request.session_id, "assistant", response.content)
+    _trim_session_history(
+        request.session_id, messages, config.conversation.max_history
+    )
+
+    return ChatResponse(
+        response=response.content,
+        session_id=request.session_id,
+        model_used=model_used,
+        tools_used=tools_used
+    )
 
 
-@app.post("/api/chat/stream")
+@app.post("/api/chat/stream", tags=["Chat"])
 async def chat_stream(request: ChatRequest):
     """Streaming chat with JAVIS (Groq only for now).
 
@@ -353,7 +620,7 @@ async def chat_stream(request: ChatRequest):
     )
 
 
-@app.post("/api/clear")
+@app.post("/api/clear", tags=["Session"])
 async def clear_session(session_id: str = "default"):
     """Clear a chat session and save conversation log."""
     logger = get_logger()
@@ -400,7 +667,7 @@ async def clear_session(session_id: str = "default"):
     }
 
 
-@app.post("/api/feedback")
+@app.post("/api/feedback", tags=["Session"])
 async def add_feedback(session_id: str, feedback: str):
     """Add feedback (good/bad) to current conversation for training."""
     logger = get_logger()
@@ -430,7 +697,7 @@ async def export_training_data(feedback_filter: str = None):
     }
 
 
-@app.get("/api/sessions")
+@app.get("/api/sessions", tags=["Session"])
 async def list_sessions():
     """List active sessions."""
     return {
@@ -456,7 +723,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
     return {"files": uploaded, "count": len(uploaded)}
 
 
-@app.get("/api/models")
+@app.get("/api/models", tags=["Models"])
 async def get_models():
     """Get available models and adapters."""
     models_dir = Path(__file__).parent.parent.parent / "models"
@@ -490,7 +757,7 @@ async def get_models():
     }
 
 
-@app.post("/api/models/local/load")
+@app.post("/api/models/local/load", tags=["Models"])
 async def load_local_model(adapter_version: Optional[str] = None):
     """Pre-load the local model (takes a few minutes)."""
     try:
@@ -510,7 +777,7 @@ async def load_local_model(adapter_version: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/models/local/unload")
+@app.post("/api/models/local/unload", tags=["Models"])
 async def unload_local_model():
     """Unload the local model to free memory."""
     global _local_client
@@ -624,7 +891,7 @@ async def trigger_training():
 
 # ==================== Tools API ====================
 
-@app.get("/api/tools")
+@app.get("/api/tools", tags=["Tools"])
 async def get_tools_info():
     """Get information about available tools."""
     from javis.tools import get_tools_info

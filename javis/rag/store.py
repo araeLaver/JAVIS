@@ -189,6 +189,39 @@ class DocumentStore:
             "metadata": json.loads(meta.get("metadata_json", "{}"))
         }
 
+    def get_documents_batch(self, document_ids: list[str]) -> dict[str, dict]:
+        """
+        Get multiple documents by IDs in a single query.
+
+        Args:
+            document_ids: List of document IDs to fetch
+
+        Returns:
+            Dict mapping document_id to document data
+        """
+        if not document_ids:
+            return {}
+
+        # Remove duplicates while preserving order
+        unique_ids = list(dict.fromkeys(document_ids))
+
+        docs = self._get_docs_collection()
+        result = docs.get(ids=unique_ids, include=["documents", "metadatas"])
+
+        documents = {}
+        for i, doc_id in enumerate(result["ids"]):
+            meta = result["metadatas"][i]
+            documents[doc_id] = {
+                "id": doc_id,
+                "source": meta.get("source"),
+                "source_path": meta.get("source_path"),
+                "title": meta.get("title"),
+                "created_at": meta.get("created_at"),
+                "metadata": json.loads(meta.get("metadata_json", "{}"))
+            }
+
+        return documents
+
     def delete_document(self, document_id: str) -> None:
         """
         Delete a document and its chunks.

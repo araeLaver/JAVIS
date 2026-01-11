@@ -1,22 +1,49 @@
 """Base classes for JAVIS tool system."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, Field
+
+
+# Supported parameter types for OpenAI/Groq function calling
+ParameterType = Literal["string", "integer", "boolean", "number", "array", "object"]
+
+# Default value can be string, int, bool, float, list, or dict
+DefaultValueType = Union[str, int, bool, float, list, dict, None]
 
 
 class ToolParameter(BaseModel):
     """도구 파라미터 정의."""
+
     name: str
-    type: str  # "string", "integer", "boolean", "array", "object"
+    type: ParameterType
     description: str
     required: bool = True
     enum: Optional[list[str]] = None
-    default: Any = None
+    default: DefaultValueType = None
 
 
 class ToolDefinition(BaseModel):
-    """Groq API 호환 도구 정의."""
+    """
+    OpenAI/Groq API compatible tool definition.
+
+    Defines the schema for a callable tool that can be used by LLMs.
+
+    Attributes:
+        name: Unique identifier for the tool.
+        description: Human-readable description of what the tool does.
+        parameters: List of parameters the tool accepts.
+
+    Example:
+        definition = ToolDefinition(
+            name="search_web",
+            description="Search the web for information",
+            parameters=[
+                ToolParameter(name="query", type="string", description="Search query")
+            ]
+        )
+    """
+
     name: str
     description: str
     parameters: list[ToolParameter] = Field(default_factory=list)
@@ -54,10 +81,15 @@ class ToolDefinition(BaseModel):
         }
 
 
+# Tool output can be string, dict, list, or None
+ToolOutputType = Union[str, dict, list, None]
+
+
 class ToolResult(BaseModel):
     """도구 실행 결과."""
+
     success: bool
-    output: Any = None
+    output: ToolOutputType = None
     error: Optional[str] = None
 
     def to_message_content(self) -> str:
@@ -71,7 +103,29 @@ class ToolResult(BaseModel):
 
 
 class BaseTool(ABC):
-    """모든 도구의 기본 추상 클래스."""
+    """
+    Abstract base class for all JAVIS tools.
+
+    Subclass this to create new tools that can be called by the LLM.
+    Each tool must define its schema via the `definition` property
+    and implement the `execute` method.
+
+    Attributes:
+        _category: Internal category for tool organization and filtering.
+
+    Example:
+        class MyTool(BaseTool):
+            @property
+            def definition(self) -> ToolDefinition:
+                return ToolDefinition(
+                    name="my_tool",
+                    description="Does something useful",
+                    parameters=[]
+                )
+
+            async def execute(self) -> ToolResult:
+                return ToolResult(success=True, output="Done!")
+    """
 
     _category: Optional[str] = None
 

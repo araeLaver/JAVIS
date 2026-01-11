@@ -61,6 +61,7 @@ nul
 # Testing
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 
 # Temporary test/debug scripts (root level)
