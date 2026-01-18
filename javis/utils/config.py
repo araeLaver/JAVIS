@@ -2,11 +2,32 @@
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Optional
 
 import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel
+
+
+# Storage Configuration for Cloud Migration
+class StorageConfig(BaseModel):
+    """Storage backend configuration."""
+
+    mode: Literal["local", "cloud"] = "local"  # local or cloud
+
+
+class SupabaseConfig(BaseModel):
+    """Supabase configuration."""
+
+    url: Optional[str] = None
+    service_role_key: Optional[str] = None
+
+
+class HuggingFaceConfig(BaseModel):
+    """HuggingFace Hub configuration."""
+
+    token: Optional[str] = None
+    repo_id: Optional[str] = None  # e.g., "username/javis-adapters"
 
 
 class GenerationConfig(BaseModel):
@@ -316,6 +337,10 @@ class Config(BaseModel):
     voice: VoiceConfig = VoiceConfig()  # Phase 6-1
     workflows: WorkflowsConfig = WorkflowsConfig()  # Phase 6-2
     integrations: IntegrationsConfig = IntegrationsConfig()  # Phase 7
+    # Cloud Storage Configuration
+    storage: StorageConfig = StorageConfig()
+    supabase: SupabaseConfig = SupabaseConfig()
+    huggingface: HuggingFaceConfig = HuggingFaceConfig()
 
     # Environment variables (loaded separately)
     groq_api_key: str | None = None
@@ -329,6 +354,10 @@ class Config(BaseModel):
     google_credentials_path: str | None = None
     notion_api_key: str | None = None
     slack_bot_token: str | None = None
+    # Cloud Storage credentials
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+    hf_repo_id: str | None = None
 
 
 _config: Config | None = None
@@ -434,6 +463,27 @@ def load_config(config_path: str | Path | None = None) -> Config:
         slack=SlackIntegrationConfig(**integrations_data.get("slack", {})),
     )
 
+    # Parse storage config (Cloud Migration)
+    storage_data = config_data.get("storage", {})
+    storage_mode = os.getenv("JAVIS_STORAGE_MODE", storage_data.get("mode", "local"))
+    storage_config = StorageConfig(mode=storage_mode)  # type: ignore
+
+    # Parse Supabase config
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    supabase_config = SupabaseConfig(
+        url=supabase_url,
+        service_role_key=supabase_key,
+    )
+
+    # Parse HuggingFace config
+    hf_token = os.getenv("HF_TOKEN")
+    hf_repo_id = os.getenv("HF_REPO_ID")
+    huggingface_config = HuggingFaceConfig(
+        token=hf_token,
+        repo_id=hf_repo_id,
+    )
+
     # Create config object
     _config = Config(
         app=AppConfig(**config_data.get("app", {})),
@@ -446,17 +496,26 @@ def load_config(config_path: str | Path | None = None) -> Config:
         voice=voice_config,
         workflows=workflows_config,
         integrations=integrations_config,
+        # Cloud Storage Configuration
+        storage=storage_config,
+        supabase=supabase_config,
+        huggingface=huggingface_config,
+        # Environment variables
         groq_api_key=os.getenv("GROQ_API_KEY"),
         runpod_api_key=os.getenv("RUNPOD_API_KEY"),
         runpod_endpoint_id=os.getenv("RUNPOD_ENDPOINT_ID"),
-        hf_token=os.getenv("HF_TOKEN"),
+        hf_token=hf_token,
         modal_token_id=os.getenv("MODAL_TOKEN_ID"),
         modal_token_secret=os.getenv("MODAL_TOKEN_SECRET"),
         discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL"),
-        # Phase 7
+        # Phase 7: External service API keys
         google_credentials_path=os.getenv("GOOGLE_CREDENTIALS_PATH"),
         notion_api_key=os.getenv("NOTION_API_KEY"),
         slack_bot_token=os.getenv("SLACK_BOT_TOKEN"),
+        # Cloud Storage credentials
+        supabase_url=supabase_url,
+        supabase_service_role_key=supabase_key,
+        hf_repo_id=hf_repo_id,
     )
 
     return _config

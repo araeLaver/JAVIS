@@ -9,6 +9,9 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
+from javis.storage import get_feedback_store as get_storage_feedback_store
+from javis.storage.base import FeedbackRecord, FeedbackStoreInterface
+
 logger = logging.getLogger(__name__)
 
 FeedbackType = Literal["good", "bad", "corrected"]
@@ -28,16 +31,70 @@ class EnhancedFeedback(BaseModel):
     corrected_response: Optional[str] = None
     metadata: dict = {}
 
+    def to_storage_record(self) -> FeedbackRecord:
+        """Convert to storage record format."""
+        return FeedbackRecord(
+            id=self.id,
+            session_id=self.session_id,
+            conversation_id=self.conversation_id,
+            timestamp=self.timestamp,
+            feedback_type=self.feedback_type,  # type: ignore
+            quality_score=self.quality_score,
+            prompt=self.prompt,
+            response=self.response,
+            corrected_response=self.corrected_response,
+            metadata=self.metadata,
+        )
+
+    @classmethod
+    def from_storage_record(cls, record: FeedbackRecord) -> "EnhancedFeedback":
+        """Create from storage record."""
+        return cls(
+            id=record.id,
+            session_id=record.session_id,
+            conversation_id=record.conversation_id,
+            timestamp=record.timestamp,
+            feedback_type=record.feedback_type,
+            quality_score=record.quality_score,
+            prompt=record.prompt,
+            response=record.response,
+            corrected_response=record.corrected_response,
+            metadata=record.metadata,
+        )
+
 
 class FeedbackStore:
-    """Stores and manages feedback data with separate directories."""
+    """Stores and manages feedback data.
 
-    def __init__(self, feedback_dir: Optional[Path] = None):
+    This class wraps the storage interface to provide backward-compatible
+    API while using the storage factory (local or cloud).
+    """
+
+    def __init__(
+        self,
+        feedback_dir: Optional[Path] = None,
+        store: Optional[FeedbackStoreInterface] = None,
+    ):
+        """Initialize feedback store.
+
+        Args:
+            feedback_dir: Legacy parameter for backward compatibility.
+            store: Storage interface to use. If None, uses storage factory.
+        """
+        self._store = store
+
+        # Keep feedback_dir for backward compatibility
         if feedback_dir is None:
             feedback_dir = Path(__file__).parent.parent.parent / "data" / "feedback"
-
         self.feedback_dir = Path(feedback_dir)
         self._ensure_directories()
+
+    @property
+    def store(self) -> FeedbackStoreInterface:
+        """Get the feedback store (lazy initialization)."""
+        if self._store is None:
+            self._store = get_storage_feedback_store()
+        return self._store
 
     def _ensure_directories(self) -> None:
         """Create feedback directories if they don't exist."""
@@ -69,17 +126,10 @@ class FeedbackStore:
         if not feedback.id:
             feedback.id = self._generate_id()
 
-        month_dir = self._get_month_dir(feedback.feedback_type, feedback.timestamp)
-        file_path = month_dir / f"{feedback.id}.json"
-
-        data = feedback.model_dump()
-        data["timestamp"] = data["timestamp"].isoformat()
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
+        # Use storage backend
+        result = self.store.save(feedback.to_storage_record())
         logger.info(f"Stored {feedback.feedback_type} feedback: {feedback.id}")
-        return feedback.id
+        return result
 
     def store_good_response(
         self,
@@ -151,7 +201,7 @@ class FeedbackStore:
     def _load_feedback_from_dir(
         self, feedback_type: FeedbackType, limit: Optional[int] = None
     ) -> list[EnhancedFeedback]:
-        """Load feedback records from a directory.
+        """Load feedback records by type.
 
         Args:
             feedback_type: Type of feedback to load
@@ -160,34 +210,9 @@ class FeedbackStore:
         Returns:
             List of EnhancedFeedback objects
         """
-        feedbacks = []
-        type_dir = self.feedback_dir / feedback_type
-
-        if not type_dir.exists():
-            return feedbacks
-
-        # Get all JSON files, sorted by modification time (newest first)
-        files = sorted(type_dir.rglob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)
-
-        if limit:
-            files = files[:limit]
-
-        for file_path in files:
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                # Convert timestamp string to datetime
-                if isinstance(data.get("timestamp"), str):
-                    data["timestamp"] = datetime.fromisoformat(data["timestamp"])
-
-                feedbacks.append(EnhancedFeedback(**data))
-
-            except (json.JSONDecodeError, IOError, ValueError) as e:
-                logger.warning(f"Failed to load {file_path}: {e}")
-                continue
-
-        return feedbacks
+        # Use storage backend
+        records = self.store.list_by_type(feedback_type, limit=limit)  # type: ignore
+        return [EnhancedFeedback.from_storage_record(r) for r in records]
 
     def get_good_responses(self, limit: Optional[int] = None) -> list[EnhancedFeedback]:
         """Get responses with positive feedback.
@@ -231,16 +256,9 @@ class FeedbackStore:
         Returns:
             List of all feedback records
         """
-        all_feedback = []
-        for feedback_type in ["good", "bad", "corrected"]:
-            all_feedback.extend(self._load_feedback_from_dir(feedback_type))
-
-        # Sort by timestamp, newest first
-        all_feedback.sort(key=lambda x: x.timestamp, reverse=True)
-
-        if limit:
-            return all_feedback[:limit]
-        return all_feedback
+        # Use storage backend
+        records = self.store.list_all(limit=limit)
+        return [EnhancedFeedback.from_storage_record(r) for r in records]
 
     def get_statistics(self) -> dict:
         """Get feedback statistics.
@@ -248,20 +266,8 @@ class FeedbackStore:
         Returns:
             Dictionary with feedback statistics
         """
-        good = self.get_good_responses()
-        bad = self.get_bad_responses()
-        corrected = self.get_corrected_responses()
-
-        total = len(good) + len(bad) + len(corrected)
-
-        return {
-            "total": total,
-            "good": len(good),
-            "bad": len(bad),
-            "corrected": len(corrected),
-            "positive_rate": len(good) / total if total > 0 else 0,
-            "correction_rate": len(corrected) / (len(bad) + len(corrected)) if (len(bad) + len(corrected)) > 0 else 0,
-        }
+        # Use storage backend
+        return self.store.get_statistics()
 
     def export_training_data(
         self,
@@ -284,35 +290,11 @@ class FeedbackStore:
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = output_dir / f"feedback_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
-        training_data = []
-
-        # Add good responses
-        for fb in self.get_good_responses():
-            training_data.append({
-                "messages": [
-                    {"role": "user", "content": fb.prompt},
-                    {"role": "assistant", "content": fb.response},
-                ]
-            })
-
-        # Add corrected responses (using the corrected version)
-        if include_corrected:
-            for fb in self.get_corrected_responses():
-                if fb.corrected_response:
-                    training_data.append({
-                        "messages": [
-                            {"role": "user", "content": fb.prompt},
-                            {"role": "assistant", "content": fb.corrected_response},
-                        ]
-                    })
-
-        # Write JSONL
-        with open(output_path, "w", encoding="utf-8") as f:
-            for item in training_data:
-                f.write(json.dumps(item, ensure_ascii=False) + "\n")
-
-        logger.info(f"Exported {len(training_data)} training examples to {output_path}")
-        return output_path
+        # Use storage backend
+        return self.store.export_for_training(
+            output_path=Path(output_path),
+            include_corrected=include_corrected,
+        )
 
     def delete_feedback(self, feedback_id: str) -> bool:
         """Delete a feedback record.
@@ -323,14 +305,11 @@ class FeedbackStore:
         Returns:
             True if deleted, False if not found
         """
-        for feedback_type in ["good", "bad", "corrected"]:
-            type_dir = self.feedback_dir / feedback_type
-            for file_path in type_dir.rglob(f"{feedback_id}.json"):
-                file_path.unlink()
-                logger.info(f"Deleted feedback: {feedback_id}")
-                return True
-
-        return False
+        # Use storage backend
+        result = self.store.delete(feedback_id)
+        if result:
+            logger.info(f"Deleted feedback: {feedback_id}")
+        return result
 
 
 # Singleton instance

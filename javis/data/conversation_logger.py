@@ -4,7 +4,15 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
 from pydantic import BaseModel
+
+from javis.storage import get_conversation_store
+from javis.storage.base import (
+    ConversationRecord,
+    ConversationStoreInterface,
+    ConversationTurn as StorageConversationTurn,
+)
 
 
 class ConversationTurn(BaseModel):
@@ -22,11 +30,63 @@ class ConversationLog(BaseModel):
     feedback: Optional[str] = None  # good, bad, None
     tags: list[str] = []
 
+    def to_storage_record(self) -> ConversationRecord:
+        """Convert to storage record format."""
+        return ConversationRecord(
+            session_id=self.session_id,
+            started_at=self.started_at,
+            turns=[
+                StorageConversationTurn(
+                    role=t.role,
+                    content=t.content,
+                    timestamp=t.timestamp,
+                )
+                for t in self.turns
+            ],
+            feedback=self.feedback,
+            tags=self.tags,
+        )
+
+    @classmethod
+    def from_storage_record(cls, record: ConversationRecord) -> "ConversationLog":
+        """Create from storage record."""
+        return cls(
+            session_id=record.session_id,
+            started_at=record.started_at,
+            turns=[
+                ConversationTurn(
+                    role=t.role,
+                    content=t.content,
+                    timestamp=t.timestamp,
+                )
+                for t in record.turns
+            ],
+            feedback=record.feedback,
+            tags=record.tags,
+        )
+
 
 class ConversationLogger:
-    """Logger for collecting fine-tuning data."""
+    """Logger for collecting fine-tuning data.
 
-    def __init__(self, data_dir: Optional[Path] = None):
+    Uses the storage factory to save conversations to either local files
+    or cloud storage (Supabase) depending on configuration.
+    """
+
+    def __init__(
+        self,
+        data_dir: Optional[Path] = None,
+        store: Optional[ConversationStoreInterface] = None,
+    ):
+        """Initialize conversation logger.
+
+        Args:
+            data_dir: Legacy parameter for backward compatibility.
+            store: Storage interface to use. If None, uses storage factory.
+        """
+        self._store = store
+
+        # Keep data_dir for backward compatibility
         if data_dir is None:
             data_dir = Path(__file__).parent.parent.parent / "data" / "conversations"
         self.data_dir = Path(data_dir)
@@ -34,6 +94,13 @@ class ConversationLogger:
 
         # 현재 활성 대화들
         self.active_conversations: dict[str, ConversationLog] = {}
+
+    @property
+    def store(self) -> ConversationStoreInterface:
+        """Get the conversation store (lazy initialization)."""
+        if self._store is None:
+            self._store = get_conversation_store()
+        return self._store
 
     def start_conversation(self, session_id: str) -> ConversationLog:
         """Start a new conversation."""
@@ -67,24 +134,16 @@ class ConversationLogger:
             self.active_conversations[session_id].tags.extend(tags)
 
     def save_conversation(self, session_id: str):
-        """Save conversation to disk."""
+        """Save conversation using the storage backend."""
         if session_id not in self.active_conversations:
             return
 
         conv = self.active_conversations[session_id]
 
-        # 날짜별 디렉토리
-        date_dir = self.data_dir / datetime.now().strftime("%Y-%m")
-        date_dir.mkdir(exist_ok=True)
+        # Use storage backend
+        result = self.store.save(conv.to_storage_record())
 
-        # 파일명: session_id_timestamp.json
-        filename = f"{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        filepath = date_dir / filename
-
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(conv.model_dump(), f, ensure_ascii=False, indent=2)
-
-        return filepath
+        return result
 
     def end_conversation(self, session_id: str):
         """End and save a conversation."""
@@ -93,46 +152,36 @@ class ConversationLogger:
             del self.active_conversations[session_id]
         return filepath
 
-    def export_for_training(self, output_path: Optional[Path] = None,
-                           feedback_filter: Optional[str] = None) -> Path:
-        """Export conversations in training format (JSONL)."""
+    def export_for_training(
+        self,
+        output_path: Optional[Path] = None,
+        feedback_filter: Optional[str] = None,
+    ) -> Path:
+        """Export conversations in training format (JSONL).
+
+        Uses the storage backend to export conversations.
+
+        Args:
+            output_path: Output file path (default: auto-generated)
+            feedback_filter: Filter by feedback type (good/bad/None)
+
+        Returns:
+            Path to the exported file
+        """
         if output_path is None:
-            output_path = self.data_dir.parent / "training" / "exported"
+            output_dir = self.data_dir.parent / "training" / "exported"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = (
+                output_dir / f"conversations_{datetime.now().strftime('%Y%m%d')}.jsonl"
+            )
         output_path = Path(output_path)
-        output_path.mkdir(parents=True, exist_ok=True)
 
-        output_file = output_path / f"conversations_{datetime.now().strftime('%Y%m%d')}.jsonl"
-
-        conversations = []
-
-        # 모든 저장된 대화 읽기
-        for json_file in self.data_dir.rglob("*.json"):
-            with open(json_file, 'r', encoding='utf-8') as f:
-                conv = json.load(f)
-
-                # 피드백 필터
-                if feedback_filter and conv.get('feedback') != feedback_filter:
-                    continue
-
-                # 대화 턴이 2개 이상인 것만 (시스템 + 유저 + 어시스턴트)
-                if len(conv.get('turns', [])) >= 2:
-                    conversations.append(conv)
-
-        # JSONL 형식으로 저장 (Qwen 학습 형식)
-        with open(output_file, 'w', encoding='utf-8') as f:
-            for conv in conversations:
-                # Qwen 대화 형식으로 변환
-                messages = []
-                for turn in conv['turns']:
-                    messages.append({
-                        "role": turn['role'],
-                        "content": turn['content']
-                    })
-
-                training_example = {"messages": messages}
-                f.write(json.dumps(training_example, ensure_ascii=False) + '\n')
-
-        return output_file
+        # Use storage backend to export
+        return self.store.export_for_training(
+            output_path=output_path,
+            feedback_filter=feedback_filter,
+            min_turns=2,
+        )
 
 
 # 전역 로거 인스턴스

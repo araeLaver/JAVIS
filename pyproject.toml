@@ -41,6 +41,11 @@ dependencies = [
     # Utilities
     "aiofiles>=23.0.0",
     "tenacity>=8.2.0",
+    "python-multipart>=0.0.6",
+
+    # Cloud Storage
+    "supabase>=2.0.0",
+    "huggingface_hub>=0.20.0",
 ]
 
 [project.optional-dependencies]

@@ -16,3 +16,7 @@ chromadb>=0.4.22
 sentence-transformers>=2.2.2
 beautifulsoup4>=4.12.2
 lxml>=5.1.0
+
+# Cloud Storage (Supabase + HuggingFace Hub)
+supabase>=2.0.0
+huggingface_hub>=0.20.0

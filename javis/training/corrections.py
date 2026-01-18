@@ -9,6 +9,9 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
+from javis.storage import get_correction_store as get_storage_correction_store
+from javis.storage.base import CorrectionRecord, CorrectionStoreInterface
+
 logger = logging.getLogger(__name__)
 
 CorrectionType = Literal["factual", "style", "format", "completeness", "other"]
@@ -27,16 +30,68 @@ class ResponseCorrection(BaseModel):
     notes: Optional[str] = None
     metadata: dict = {}
 
+    def to_storage_record(self) -> CorrectionRecord:
+        """Convert to storage record format."""
+        return CorrectionRecord(
+            id=self.id,
+            session_id=self.session_id,
+            timestamp=self.timestamp,
+            original_prompt=self.original_prompt,
+            original_response=self.original_response,
+            corrected_response=self.corrected_response,
+            correction_type=self.correction_type,  # type: ignore
+            notes=self.notes,
+            metadata=self.metadata,
+        )
+
+    @classmethod
+    def from_storage_record(cls, record: CorrectionRecord) -> "ResponseCorrection":
+        """Create from storage record."""
+        return cls(
+            id=record.id,
+            session_id=record.session_id,
+            timestamp=record.timestamp,
+            original_prompt=record.original_prompt,
+            original_response=record.original_response,
+            corrected_response=record.corrected_response,
+            correction_type=record.correction_type,
+            notes=record.notes,
+            metadata=record.metadata,
+        )
+
 
 class CorrectionManager:
-    """Manages response corrections for training data improvement."""
+    """Manages response corrections for training data improvement.
 
-    def __init__(self, corrections_dir: Optional[Path] = None):
+    This class wraps the storage interface to provide backward-compatible
+    API while using the storage factory (local or cloud).
+    """
+
+    def __init__(
+        self,
+        corrections_dir: Optional[Path] = None,
+        store: Optional[CorrectionStoreInterface] = None,
+    ):
+        """Initialize correction manager.
+
+        Args:
+            corrections_dir: Legacy parameter for backward compatibility.
+            store: Storage interface to use. If None, uses storage factory.
+        """
+        self._store = store
+
+        # Keep corrections_dir for backward compatibility
         if corrections_dir is None:
             corrections_dir = Path(__file__).parent.parent.parent / "data" / "corrections"
-
         self.corrections_dir = Path(corrections_dir)
         self.corrections_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def store(self) -> CorrectionStoreInterface:
+        """Get the correction store (lazy initialization)."""
+        if self._store is None:
+            self._store = get_storage_correction_store()
+        return self._store
 
     def _generate_id(self) -> str:
         """Generate a unique correction ID."""
@@ -90,17 +145,10 @@ class CorrectionManager:
             metadata=metadata or {},
         )
 
-        month_dir = self._get_month_dir(timestamp)
-        file_path = month_dir / f"{correction_id}.json"
-
-        data = correction.model_dump()
-        data["timestamp"] = data["timestamp"].isoformat()
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
+        # Use storage backend
+        result = self.store.save(correction.to_storage_record())
         logger.info(f"Added correction: {correction_id}")
-        return correction_id
+        return result
 
     def get_correction(self, correction_id: str) -> Optional[ResponseCorrection]:
         """Get a correction by ID.
@@ -111,20 +159,10 @@ class CorrectionManager:
         Returns:
             ResponseCorrection or None
         """
-        for file_path in self.corrections_dir.rglob(f"{correction_id}.json"):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                if isinstance(data.get("timestamp"), str):
-                    data["timestamp"] = datetime.fromisoformat(data["timestamp"])
-
-                return ResponseCorrection(**data)
-
-            except (json.JSONDecodeError, IOError, ValueError) as e:
-                logger.warning(f"Failed to load correction {correction_id}: {e}")
-                return None
-
+        # Use storage backend
+        record = self.store.get(correction_id)
+        if record:
+            return ResponseCorrection.from_storage_record(record)
         return None
 
     def get_corrections(
@@ -145,43 +183,14 @@ class CorrectionManager:
         Returns:
             List of ResponseCorrection objects
         """
-        corrections = []
-
-        # Get all JSON files, sorted by modification time
-        files = sorted(
-            self.corrections_dir.rglob("*.json"),
-            key=lambda x: x.stat().st_mtime,
-            reverse=True,
+        # Use storage backend
+        records = self.store.list_all(
+            start=start,
+            end=end,
+            correction_type=correction_type,  # type: ignore
+            limit=limit,
         )
-
-        for file_path in files:
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                if isinstance(data.get("timestamp"), str):
-                    data["timestamp"] = datetime.fromisoformat(data["timestamp"])
-
-                correction = ResponseCorrection(**data)
-
-                # Apply filters
-                if start and correction.timestamp < start:
-                    continue
-                if end and correction.timestamp > end:
-                    continue
-                if correction_type and correction.correction_type != correction_type:
-                    continue
-
-                corrections.append(correction)
-
-                if limit and len(corrections) >= limit:
-                    break
-
-            except (json.JSONDecodeError, IOError, ValueError) as e:
-                logger.warning(f"Failed to load {file_path}: {e}")
-                continue
-
-        return corrections
+        return [ResponseCorrection.from_storage_record(r) for r in records]
 
     def update_correction(
         self,
@@ -201,29 +210,16 @@ class CorrectionManager:
         Returns:
             True if updated
         """
-        for file_path in self.corrections_dir.rglob(f"{correction_id}.json"):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                if corrected_response is not None:
-                    data["corrected_response"] = corrected_response
-                if correction_type is not None:
-                    data["correction_type"] = correction_type
-                if notes is not None:
-                    data["notes"] = notes
-
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-
-                logger.info(f"Updated correction: {correction_id}")
-                return True
-
-            except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Failed to update correction {correction_id}: {e}")
-                return False
-
-        return False
+        # Use storage backend
+        result = self.store.update(
+            correction_id=correction_id,
+            corrected_response=corrected_response,
+            correction_type=correction_type,  # type: ignore
+            notes=notes,
+        )
+        if result:
+            logger.info(f"Updated correction: {correction_id}")
+        return result
 
     def delete_correction(self, correction_id: str) -> bool:
         """Delete a correction.
@@ -234,12 +230,11 @@ class CorrectionManager:
         Returns:
             True if deleted
         """
-        for file_path in self.corrections_dir.rglob(f"{correction_id}.json"):
-            file_path.unlink()
+        # Use storage backend
+        result = self.store.delete(correction_id)
+        if result:
             logger.info(f"Deleted correction: {correction_id}")
-            return True
-
-        return False
+        return result
 
     def export_for_training(self, output_path: Optional[Path] = None) -> Path:
         """Export corrections as training JSONL.
@@ -257,23 +252,8 @@ class CorrectionManager:
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = output_dir / f"corrections_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
-        corrections = self.get_corrections()
-        training_data = []
-
-        for corr in corrections:
-            training_data.append({
-                "messages": [
-                    {"role": "user", "content": corr.original_prompt},
-                    {"role": "assistant", "content": corr.corrected_response},
-                ]
-            })
-
-        with open(output_path, "w", encoding="utf-8") as f:
-            for item in training_data:
-                f.write(json.dumps(item, ensure_ascii=False) + "\n")
-
-        logger.info(f"Exported {len(training_data)} corrections to {output_path}")
-        return output_path
+        # Use storage backend
+        return self.store.export_for_training(Path(output_path))
 
     def get_statistics(self) -> dict:
         """Get correction statistics.
@@ -281,22 +261,8 @@ class CorrectionManager:
         Returns:
             Dictionary with statistics
         """
-        corrections = self.get_corrections()
-
-        by_type: dict[str, int] = {}
-        for corr in corrections:
-            by_type[corr.correction_type] = by_type.get(corr.correction_type, 0) + 1
-
-        return {
-            "total": len(corrections),
-            "by_type": by_type,
-            "this_month": sum(
-                1
-                for c in corrections
-                if c.timestamp.month == datetime.now().month
-                and c.timestamp.year == datetime.now().year
-            ),
-        }
+        # Use storage backend
+        return self.store.get_statistics()
 
 
 # Singleton instance

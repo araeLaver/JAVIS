@@ -8,6 +8,8 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from javis.storage import get_conversation_store
+from javis.storage.base import ConversationStoreInterface
 from javis.utils.config import TrainingConfig, get_config
 
 from .ab_testing import ABTestManager, get_ab_test_manager
@@ -46,17 +48,26 @@ class DataStats(BaseModel):
 
 
 class TrainingPipeline:
-    """Orchestrates the complete training workflow."""
+    """Orchestrates the complete training workflow.
+
+    Uses the storage factory to access conversations from either local files
+    or cloud storage (Supabase) depending on configuration.
+    """
 
     def __init__(
         self,
         config: Optional[TrainingConfig] = None,
         conversations_dir: Optional[Path] = None,
+        conversation_store: Optional[ConversationStoreInterface] = None,
     ):
         if config is None:
             config = get_config().training
         self.config = config
 
+        # Store reference (lazy initialization)
+        self._conversation_store = conversation_store
+
+        # Keep conversations_dir for backward compatibility
         if conversations_dir is None:
             conversations_dir = (
                 Path(__file__).parent.parent.parent / "data" / "conversations"
@@ -71,26 +82,30 @@ class TrainingPipeline:
         self.ab_test_manager = get_ab_test_manager()
         self.preference_generator = get_preference_generator()
 
+    @property
+    def conversation_store(self) -> ConversationStoreInterface:
+        """Get the conversation store (lazy initialization)."""
+        if self._conversation_store is None:
+            self._conversation_store = get_conversation_store()
+        return self._conversation_store
+
     def get_data_stats(self) -> DataStats:
         """Get statistics about available training data."""
         stats = DataStats()
         quality_scores: list[float] = []
         min_quality = self.config.data_quality.min_score
 
-        if not self.conversations_dir.exists():
-            return stats
+        # Get all conversations from storage
+        conversations = self.conversation_store.list_all()
 
-        for json_file in self.conversations_dir.rglob("*.json"):
+        for conv in conversations:
             try:
-                with open(json_file, "r", encoding="utf-8") as f:
-                    conv = json.load(f)
-
                 # Check minimum turns
-                if len(conv.get("turns", [])) < 2:
+                if len(conv.turns) < 2:
                     continue
 
                 stats.total_conversations += 1
-                feedback = conv.get("feedback")
+                feedback = conv.feedback
 
                 if feedback == "good":
                     stats.good_feedback += 1
@@ -100,13 +115,23 @@ class TrainingPipeline:
                     stats.no_feedback += 1
 
                 # Calculate quality score
-                quality = self.quality_scorer.score_conversation(conv)
+                conv_dict = {
+                    "session_id": conv.session_id,
+                    "started_at": conv.started_at,
+                    "turns": [
+                        {"role": t.role, "content": t.content, "timestamp": t.timestamp}
+                        for t in conv.turns
+                    ],
+                    "feedback": conv.feedback,
+                    "tags": conv.tags,
+                }
+                quality = self.quality_scorer.score_conversation(conv_dict)
                 quality_scores.append(quality.overall_score)
 
                 if quality.overall_score >= min_quality:
                     stats.high_quality += 1
 
-            except (json.JSONDecodeError, IOError):
+            except Exception:
                 continue
 
         # Ready = good + no feedback (if not excluding bad)
@@ -171,7 +196,7 @@ class TrainingPipeline:
                 / f"conversations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
             )
 
-        conversations = []
+        exported_conversations = []
         cutoff_date = None
         if self.config.data.max_age_days > 0:
             cutoff_date = datetime.now() - timedelta(days=self.config.data.max_age_days)
@@ -179,25 +204,25 @@ class TrainingPipeline:
         min_quality = self.config.data_quality.min_score
         filtered_by_quality = 0
 
-        for json_file in self.conversations_dir.rglob("*.json"):
-            try:
-                with open(json_file, "r", encoding="utf-8") as f:
-                    conv = json.load(f)
+        # Get all conversations from storage
+        conversations = self.conversation_store.list_all()
 
+        for conv in conversations:
+            try:
                 # Skip if not enough turns
-                if len(conv.get("turns", [])) < 2:
+                if len(conv.turns) < 2:
                     continue
 
                 # Skip bad feedback if configured
                 if (
                     self.config.data.exclude_bad_feedback
-                    and conv.get("feedback") == "bad"
+                    and conv.feedback == "bad"
                 ):
                     continue
 
                 # Skip old conversations
                 if cutoff_date:
-                    started_at = conv.get("started_at", "")
+                    started_at = conv.started_at
                     if started_at:
                         try:
                             conv_date = datetime.fromisoformat(started_at)
@@ -208,31 +233,41 @@ class TrainingPipeline:
 
                 # Quality filter
                 if use_quality_filter:
-                    quality = self.quality_scorer.score_conversation(conv)
+                    conv_dict = {
+                        "session_id": conv.session_id,
+                        "started_at": conv.started_at,
+                        "turns": [
+                            {"role": t.role, "content": t.content, "timestamp": t.timestamp}
+                            for t in conv.turns
+                        ],
+                        "feedback": conv.feedback,
+                        "tags": conv.tags,
+                    }
+                    quality = self.quality_scorer.score_conversation(conv_dict)
                     if quality.overall_score < min_quality:
                         filtered_by_quality += 1
                         continue
 
                 # Extract messages
                 messages = []
-                for turn in conv.get("turns", []):
+                for turn in conv.turns:
                     messages.append(
-                        {"role": turn["role"], "content": turn["content"]}
+                        {"role": turn.role, "content": turn.content}
                     )
 
-                conversations.append({"messages": messages})
+                exported_conversations.append({"messages": messages})
 
-            except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Failed to read {json_file}: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to process conversation {conv.session_id}: {e}")
                 continue
 
         # Write JSONL
         with open(output_path, "w", encoding="utf-8") as f:
-            for conv in conversations:
+            for conv in exported_conversations:
                 f.write(json.dumps(conv, ensure_ascii=False) + "\n")
 
         logger.info(
-            f"Exported {len(conversations)} conversations to {output_path} "
+            f"Exported {len(exported_conversations)} conversations to {output_path} "
             f"(filtered {filtered_by_quality} by quality)"
         )
         return output_path

@@ -8,6 +8,13 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from javis.storage import get_conversation_store, get_quality_score_store
+from javis.storage.base import (
+    ConversationStoreInterface,
+    QualityScoreRecord,
+    QualityScoreStoreInterface,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,20 +46,45 @@ class DataQualityConfig(BaseModel):
 
 
 class DataQualityScorer:
-    """Scores training data quality."""
+    """Scores training data quality.
+
+    Uses the storage factory to read conversations from either local files
+    or cloud storage (Supabase) depending on configuration.
+    """
 
     def __init__(
         self,
         config: Optional[DataQualityConfig] = None,
         conversations_dir: Optional[Path] = None,
+        conversation_store: Optional[ConversationStoreInterface] = None,
+        quality_store: Optional[QualityScoreStoreInterface] = None,
     ):
         self.config = config or DataQualityConfig()
 
+        # Store references (lazy initialization)
+        self._conversation_store = conversation_store
+        self._quality_store = quality_store
+
+        # Keep conversations_dir for backward compatibility
         if conversations_dir is None:
             conversations_dir = (
                 Path(__file__).parent.parent.parent / "data" / "conversations"
             )
         self.conversations_dir = Path(conversations_dir)
+
+    @property
+    def conversation_store(self) -> ConversationStoreInterface:
+        """Get the conversation store (lazy initialization)."""
+        if self._conversation_store is None:
+            self._conversation_store = get_conversation_store()
+        return self._conversation_store
+
+    @property
+    def quality_store(self) -> QualityScoreStoreInterface:
+        """Get the quality score store (lazy initialization)."""
+        if self._quality_store is None:
+            self._quality_store = get_quality_score_store()
+        return self._quality_store
 
     def _calculate_length_score(self, conversation: dict) -> float:
         """Calculate score based on conversation length.
@@ -227,28 +259,69 @@ class DataQualityScorer:
             computed_at=datetime.now(),
         )
 
-    def score_all_conversations(self) -> list[DataQualityScore]:
-        """Score all conversations in the conversations directory.
+    def score_all_conversations(self, use_cache: bool = True) -> list[DataQualityScore]:
+        """Score all conversations using the storage backend.
+
+        Args:
+            use_cache: Whether to use cached scores when available
 
         Returns:
             List of DataQualityScore for all conversations
         """
         scores = []
 
-        if not self.conversations_dir.exists():
-            logger.warning(f"Conversations directory not found: {self.conversations_dir}")
-            return scores
+        # Get all conversations from storage
+        conversations = self.conversation_store.list_all()
 
-        for json_file in self.conversations_dir.rglob("*.json"):
+        for conv in conversations:
             try:
-                with open(json_file, "r", encoding="utf-8") as f:
-                    conversation = json.load(f)
+                # Check cache if enabled
+                if use_cache:
+                    cached = self.quality_store.get(conv.session_id)
+                    if cached:
+                        scores.append(
+                            DataQualityScore(
+                                conversation_id=cached.conversation_id,
+                                overall_score=cached.overall_score,
+                                length_score=cached.length_score,
+                                coherence_score=cached.coherence_score,
+                                feedback_score=cached.feedback_score,
+                                recency_score=cached.recency_score,
+                                computed_at=cached.computed_at,
+                            )
+                        )
+                        continue
 
-                score = self.score_conversation(conversation)
+                # Convert to dict for scoring
+                conv_dict = {
+                    "session_id": conv.session_id,
+                    "started_at": conv.started_at,
+                    "turns": [
+                        {"role": t.role, "content": t.content, "timestamp": t.timestamp}
+                        for t in conv.turns
+                    ],
+                    "feedback": conv.feedback,
+                    "tags": conv.tags,
+                }
+
+                score = self.score_conversation(conv_dict)
                 scores.append(score)
 
-            except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Failed to read {json_file}: {e}")
+                # Cache the score
+                self.quality_store.save(
+                    QualityScoreRecord(
+                        conversation_id=score.conversation_id,
+                        overall_score=score.overall_score,
+                        length_score=score.length_score,
+                        coherence_score=score.coherence_score,
+                        feedback_score=score.feedback_score,
+                        recency_score=score.recency_score,
+                        computed_at=score.computed_at,
+                    )
+                )
+
+            except Exception as e:
+                logger.warning(f"Failed to score conversation {conv.session_id}: {e}")
                 continue
 
         logger.info(f"Scored {len(scores)} conversations")
@@ -263,8 +336,13 @@ class DataQualityScorer:
         Returns:
             List of conversation IDs meeting the threshold
         """
-        scores = self.score_all_conversations()
-        return [s.conversation_id for s in scores if s.overall_score >= min_score]
+        # Try to use storage backend's optimized method first
+        try:
+            return self.quality_store.get_high_quality_ids(min_score)
+        except Exception:
+            # Fallback to scoring all conversations
+            scores = self.score_all_conversations()
+            return [s.conversation_id for s in scores if s.overall_score >= min_score]
 
     def get_statistics(self) -> dict:
         """Get statistics about data quality.
