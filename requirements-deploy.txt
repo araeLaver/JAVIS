@@ -1,0 +1,13 @@
+# Minimal dependencies for Koyeb deployment (API server only)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+httpx>=0.25.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+aiofiles>=23.2.1
+python-multipart>=0.0.6
+
+# Cloud Storage
+supabase>=2.0.0
+huggingface_hub>=0.20.0
