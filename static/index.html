@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JAVIS - Personal AI Assistant</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         /* ============================================
            SECTION 1: CSS Variables & Base Styles
@@ -1167,6 +1168,311 @@
         .skeleton-text.short { width: 60%; }
         .skeleton-text.medium { width: 80%; }
         .skeleton-text.long { width: 100%; }
+
+        /* ============================================
+           SECTION 13: Training/Analytics/Integrations Dashboard
+           ============================================ */
+
+        /* Chart Container */
+        .chart-container {
+            background: var(--color-bg-card);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid var(--color-border);
+        }
+
+        .chart-container h4 {
+            margin-bottom: 16px;
+            font-size: 0.95rem;
+            color: var(--color-text-muted);
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 250px;
+        }
+
+        /* Charts Grid */
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        @media (max-width: 1024px) {
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Model Version List */
+        .version-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .version-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: var(--color-bg-card);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            border: 1px solid var(--color-border);
+            transition: var(--transition-fast);
+        }
+
+        .version-item:hover {
+            background: var(--color-bg-light);
+        }
+
+        .version-item .version-name {
+            font-weight: 600;
+            color: var(--color-primary);
+        }
+
+        .version-item .version-stats {
+            display: flex;
+            gap: 16px;
+            font-size: 0.85rem;
+            color: var(--color-text-muted);
+        }
+
+        .version-item .version-stats span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        /* Scheduler Status */
+        .scheduler-status {
+            background: var(--color-bg-card);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid var(--color-border);
+        }
+
+        .scheduler-status .status-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .scheduler-status .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .scheduler-status .status-badge.running {
+            background: rgba(0, 255, 136, 0.2);
+            color: var(--color-success);
+        }
+
+        .scheduler-status .status-badge.stopped {
+            background: rgba(255, 68, 68, 0.2);
+            color: var(--color-danger);
+        }
+
+        .scheduler-status .status-info {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .scheduler-status .status-info-item {
+            font-size: 0.85rem;
+        }
+
+        .scheduler-status .status-info-item label {
+            color: var(--color-text-muted);
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .scheduler-status .btn-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        /* A/B Test Cards */
+        .ab-test-card {
+            background: var(--color-bg-card);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 12px;
+            border: 1px solid var(--color-border);
+        }
+
+        .ab-test-card .test-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .ab-test-card .test-versions {
+            display: flex;
+            gap: 8px;
+            font-size: 0.9rem;
+        }
+
+        .ab-test-card .test-versions .vs {
+            color: var(--color-text-muted);
+        }
+
+        .ab-test-card .test-metrics {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .ab-test-card .metric-box {
+            background: var(--color-bg-light);
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+        }
+
+        .ab-test-card .metric-box .label {
+            font-size: 0.75rem;
+            color: var(--color-text-muted);
+            margin-bottom: 4px;
+        }
+
+        .ab-test-card .metric-box .value {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .ab-test-card .test-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        /* Analytics Grid */
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        @media (max-width: 1200px) {
+            .analytics-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .analytics-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Period Selector */
+        .period-selector {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+
+        .period-selector .period-btn {
+            padding: 8px 16px;
+            border: 1px solid var(--color-border);
+            background: transparent;
+            color: var(--color-text);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: var(--transition-fast);
+        }
+
+        .period-selector .period-btn:hover {
+            background: var(--color-bg-light);
+        }
+
+        .period-selector .period-btn.active {
+            background: var(--color-primary);
+            border-color: var(--color-primary);
+            color: var(--color-bg-dark);
+        }
+
+        /* Integration Cards */
+        .integration-card {
+            background: var(--color-bg-card);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+            border: 1px solid var(--color-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .integration-card .integration-info {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .integration-card .integration-icon {
+            font-size: 2rem;
+            width: 50px;
+            text-align: center;
+        }
+
+        .integration-card .integration-details h4 {
+            margin-bottom: 4px;
+        }
+
+        .integration-card .integration-details p {
+            font-size: 0.85rem;
+            color: var(--color-text-muted);
+            margin-bottom: 4px;
+        }
+
+        .integration-card .integration-details .config-hint {
+            font-size: 0.75rem;
+            color: var(--color-warning);
+            font-style: italic;
+        }
+
+        .integration-card .integration-status {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .integration-card .integration-status.connected {
+            background: rgba(0, 255, 136, 0.2);
+            color: var(--color-success);
+        }
+
+        .integration-card .integration-status.disabled {
+            background: rgba(255, 170, 0, 0.2);
+            color: var(--color-warning);
+        }
+
+        .integration-card .integration-status.not-configured {
+            background: rgba(136, 136, 136, 0.2);
+            color: var(--color-text-muted);
+        }
+
+        .integration-card .integration-actions {
+            display: flex;
+            gap: 8px;
+            margin-left: 16px;
+        }
     </style>
 </head>
 <body>
@@ -1190,6 +1496,18 @@
                 <div class="nav-item" data-panel="workflows" onclick="Navigation.goto('workflows')">
                     <span>⚙️</span>
                     <span class="tooltip">Workflows</span>
+                </div>
+                <div class="nav-item" data-panel="training" onclick="Navigation.goto('training')">
+                    <span>📈</span>
+                    <span class="tooltip">Training</span>
+                </div>
+                <div class="nav-item" data-panel="analytics" onclick="Navigation.goto('analytics')">
+                    <span>📊</span>
+                    <span class="tooltip">Analytics</span>
+                </div>
+                <div class="nav-item" data-panel="integrations" onclick="Navigation.goto('integrations')">
+                    <span>🔗</span>
+                    <span class="tooltip">Integrations</span>
                 </div>
                 <div class="nav-item" data-panel="status" onclick="Navigation.goto('status')">
                     <span>📊</span>
@@ -1318,6 +1636,166 @@
                 </div>
             </section>
 
+            <!-- Training Panel -->
+            <section class="panel" id="panel-training">
+                <div class="panel-header">
+                    <h2>📈 Training Dashboard</h2>
+                    <button class="btn btn-secondary btn-sm" onclick="TrainingPanel.refresh()">Refresh</button>
+                </div>
+                <div class="panel-body">
+                    <!-- Stats Grid -->
+                    <div class="stats-grid" id="trainingStats">
+                        <div class="stat-card">
+                            <div class="stat-value" id="trainingVersionCount">-</div>
+                            <div class="stat-label">Model Versions</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="trainingRequests">-</div>
+                            <div class="stat-label">Total Requests (7d)</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="trainingQuality">-</div>
+                            <div class="stat-label">Avg Quality Score</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="trainingABTests">-</div>
+                            <div class="stat-label">Active A/B Tests</div>
+                        </div>
+                    </div>
+
+                    <!-- Scheduler Status -->
+                    <div class="scheduler-status" id="schedulerStatus">
+                        <div class="status-header">
+                            <h4>Training Scheduler</h4>
+                            <span class="status-badge stopped" id="schedulerBadge">Stopped</span>
+                        </div>
+                        <div class="status-info">
+                            <div class="status-info-item">
+                                <label>Next Run</label>
+                                <span id="schedulerNextRun">-</span>
+                            </div>
+                            <div class="status-info-item">
+                                <label>Last Run</label>
+                                <span id="schedulerLastRun">-</span>
+                            </div>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-success btn-sm" id="schedulerStartBtn" onclick="TrainingPanel.startScheduler()">Start</button>
+                            <button class="btn btn-danger btn-sm" id="schedulerStopBtn" onclick="TrainingPanel.stopScheduler()">Stop</button>
+                            <button class="btn btn-secondary btn-sm" onclick="TrainingPanel.runNow()">Run Now</button>
+                        </div>
+                    </div>
+
+                    <!-- Quality Score Distribution Chart -->
+                    <div class="chart-container">
+                        <h4>Quality Score Distribution</h4>
+                        <div class="chart-wrapper">
+                            <canvas id="qualityChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Model Versions List -->
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">Model Versions</span>
+                        </div>
+                        <div class="version-list" id="versionList">
+                            <div class="skeleton skeleton-text long"></div>
+                            <div class="skeleton skeleton-text medium"></div>
+                        </div>
+                    </div>
+
+                    <!-- A/B Tests -->
+                    <div class="card" style="margin-top: 20px;">
+                        <div class="card-header">
+                            <span class="card-title">A/B Tests</span>
+                            <button class="btn btn-primary btn-sm" onclick="TrainingPanel.showCreateABTest()">Create Test</button>
+                        </div>
+                        <div id="abTestList">
+                            <div class="skeleton skeleton-text long"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Analytics Panel -->
+            <section class="panel" id="panel-analytics">
+                <div class="panel-header">
+                    <h2>📊 Analytics Dashboard</h2>
+                    <button class="btn btn-secondary btn-sm" onclick="AnalyticsPanel.refresh()">Refresh</button>
+                </div>
+                <div class="panel-body">
+                    <!-- Period Selector -->
+                    <div class="period-selector">
+                        <button class="period-btn active" data-days="7" onclick="AnalyticsPanel.onPeriodChange(7)">7 Days</button>
+                        <button class="period-btn" data-days="14" onclick="AnalyticsPanel.onPeriodChange(14)">14 Days</button>
+                        <button class="period-btn" data-days="30" onclick="AnalyticsPanel.onPeriodChange(30)">30 Days</button>
+                    </div>
+
+                    <!-- Stats Grid -->
+                    <div class="analytics-grid" id="analyticsStats">
+                        <div class="stat-card">
+                            <div class="stat-value" id="analyticsConversations">-</div>
+                            <div class="stat-label">Total Conversations</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="analyticsLatency">-</div>
+                            <div class="stat-label">Avg Latency (ms)</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="analyticsFeedback">-</div>
+                            <div class="stat-label">Positive Feedback</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="analyticsTools">-</div>
+                            <div class="stat-label">Tool Invocations</div>
+                        </div>
+                    </div>
+
+                    <!-- Charts Grid -->
+                    <div class="charts-grid">
+                        <div class="chart-container">
+                            <h4>Daily Conversations</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="conversationsChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <h4>Latency Distribution</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="latencyChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <h4>Tool Usage</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="toolUsageChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <h4>Feedback Trends</h4>
+                            <div class="chart-wrapper">
+                                <canvas id="feedbackChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Integrations Panel -->
+            <section class="panel" id="panel-integrations">
+                <div class="panel-header">
+                    <h2>🔗 Integrations</h2>
+                    <button class="btn btn-secondary btn-sm" onclick="IntegrationsPanel.refresh()">Refresh</button>
+                </div>
+                <div class="panel-body">
+                    <div id="integrationsList">
+                        <div class="skeleton skeleton-text long"></div>
+                        <div class="skeleton skeleton-text medium"></div>
+                    </div>
+                </div>
+            </section>
+
             <!-- Status Panel -->
             <section class="panel" id="panel-status">
                 <div class="panel-header">
@@ -1403,7 +1881,7 @@
                         <table class="data-table">
                             <tbody>
                                 <tr><td><code>Ctrl+Enter</code></td><td>Send message</td></tr>
-                                <tr><td><code>Ctrl+1-6</code></td><td>Switch panels</td></tr>
+                                <tr><td><code>Ctrl+1-9</code></td><td>Switch panels</td></tr>
                                 <tr><td><code>Ctrl+L</code></td><td>Clear chat</td></tr>
                                 <tr><td><code>Ctrl+M</code></td><td>Toggle TTS</td></tr>
                                 <tr><td><code>Escape</code></td><td>Close modal</td></tr>
@@ -1460,7 +1938,9 @@
             workflows: '/api/workflows',
             voiceTTS: '/api/voice/tts',
             voiceVoices: '/api/voice/tts/voices',
-            status: '/api/status'
+            status: '/api/status',
+            analyticsDashboard: '/api/analytics/dashboard',
+            integrationsStatus: '/api/integrations/status'
         };
 
         // ============================================
@@ -1625,6 +2105,9 @@
                     case 'memory': MemoryPanel.init(); break;
                     case 'rag': RAGPanel.init(); break;
                     case 'workflows': WorkflowPanel.init(); break;
+                    case 'training': TrainingPanel.init(); break;
+                    case 'analytics': AnalyticsPanel.init(); break;
+                    case 'integrations': IntegrationsPanel.init(); break;
                     case 'status': StatusPanel.init(); break;
                     case 'settings': SettingsPanel.init(); break;
                 }
@@ -2380,7 +2863,596 @@
         };
 
         // ============================================
-        // SECTION 11: Status Panel
+        // SECTION 11: Training Panel
+        // ============================================
+        const TrainingPanel = {
+            initialized: false,
+            qualityChart: null,
+
+            async init() {
+                if (!this.initialized) {
+                    await this.loadData();
+                    this.initialized = true;
+                }
+            },
+
+            async refresh() {
+                await this.loadData();
+                Toast.success('Training data refreshed');
+            },
+
+            async loadData() {
+                try {
+                    // Load dashboard metrics
+                    const dashboard = await API.get('/api/training/metrics/dashboard');
+                    this.renderStats(dashboard);
+                    this.renderVersions(dashboard);
+
+                    // Load quality stats
+                    const quality = await API.get('/api/training/quality/stats');
+                    this.renderQualityChart(quality);
+
+                    // Load scheduler status
+                    const scheduler = await API.get('/api/training/scheduler');
+                    this.renderScheduler(scheduler);
+
+                    // Load A/B tests
+                    const abTests = await API.get('/api/training/ab-tests');
+                    this.renderABTests(abTests);
+                } catch (error) {
+                    console.error('Failed to load training data:', error);
+                }
+            },
+
+            renderStats(dashboard) {
+                const versions = dashboard.versions || [];
+                const activeTests = dashboard.active_ab_tests || 0;
+
+                document.getElementById('trainingVersionCount').textContent = versions.length;
+                document.getElementById('trainingRequests').textContent = dashboard.total_requests || '-';
+                document.getElementById('trainingQuality').textContent = dashboard.avg_quality_score ?
+                    dashboard.avg_quality_score.toFixed(2) : '-';
+                document.getElementById('trainingABTests').textContent = activeTests;
+            },
+
+            renderScheduler(scheduler) {
+                const badge = document.getElementById('schedulerBadge');
+                const startBtn = document.getElementById('schedulerStartBtn');
+                const stopBtn = document.getElementById('schedulerStopBtn');
+
+                if (scheduler.running) {
+                    badge.textContent = 'Running';
+                    badge.className = 'status-badge running';
+                    startBtn.disabled = true;
+                    stopBtn.disabled = false;
+                } else {
+                    badge.textContent = 'Stopped';
+                    badge.className = 'status-badge stopped';
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                }
+
+                document.getElementById('schedulerNextRun').textContent =
+                    scheduler.next_run ? Utils.formatDate(scheduler.next_run) : '-';
+                document.getElementById('schedulerLastRun').textContent =
+                    scheduler.last_run ? Utils.formatDate(scheduler.last_run) : '-';
+            },
+
+            renderQualityChart(quality) {
+                const ctx = document.getElementById('qualityChart');
+                if (!ctx) return;
+
+                // Destroy existing chart
+                if (this.qualityChart) {
+                    this.qualityChart.destroy();
+                }
+
+                // Create distribution data
+                const scores = quality.score_distribution || {
+                    '0.0-0.2': 5,
+                    '0.2-0.4': 10,
+                    '0.4-0.6': 25,
+                    '0.6-0.8': 40,
+                    '0.8-1.0': 20
+                };
+
+                this.qualityChart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: Object.keys(scores),
+                        datasets: [{
+                            label: 'Conversations',
+                            data: Object.values(scores),
+                            backgroundColor: 'rgba(0, 212, 255, 0.6)',
+                            borderColor: 'rgba(0, 212, 255, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                grid: { color: 'rgba(255,255,255,0.1)' },
+                                ticks: { color: '#888' }
+                            },
+                            x: {
+                                grid: { display: false },
+                                ticks: { color: '#888' }
+                            }
+                        }
+                    }
+                });
+            },
+
+            renderVersions(dashboard) {
+                const container = document.getElementById('versionList');
+                const versions = dashboard.versions || [];
+                const metrics = dashboard.version_metrics || {};
+
+                if (versions.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No model versions found</div>';
+                    return;
+                }
+
+                container.innerHTML = versions.map(v => {
+                    const m = metrics[v] || {};
+                    return `
+                        <div class="version-item">
+                            <span class="version-name">${v}</span>
+                            <div class="version-stats">
+                                <span>📊 ${m.requests || 0} requests</span>
+                                <span>⚡ ${m.avg_latency_ms ? m.avg_latency_ms.toFixed(0) : '-'}ms</span>
+                                <span>👍 ${m.positive_rate ? (m.positive_rate * 100).toFixed(1) : '-'}%</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            },
+
+            renderABTests(data) {
+                const container = document.getElementById('abTestList');
+                const tests = data.tests || [];
+
+                if (tests.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No A/B tests</div>';
+                    return;
+                }
+
+                container.innerHTML = tests.map(t => `
+                    <div class="ab-test-card">
+                        <div class="test-header">
+                            <div class="test-versions">
+                                <span>${t.version_a}</span>
+                                <span class="vs">vs</span>
+                                <span>${t.version_b}</span>
+                            </div>
+                            <span class="status-badge ${t.status === 'running' ? 'running' : 'stopped'}">${t.status}</span>
+                        </div>
+                        <div class="test-metrics">
+                            <div class="metric-box">
+                                <div class="label">Split</div>
+                                <div class="value">${(t.traffic_split * 100).toFixed(0)}%</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="label">Started</div>
+                                <div class="value">${t.start_time ? new Date(t.start_time).toLocaleDateString() : '-'}</div>
+                            </div>
+                        </div>
+                        <div class="test-actions">
+                            ${t.status === 'running' ? `
+                                <button class="btn btn-success btn-sm" onclick="TrainingPanel.completeABTest('${t.test_id}')">Complete</button>
+                            ` : ''}
+                            <button class="btn btn-danger btn-sm" onclick="TrainingPanel.deleteABTest('${t.test_id}')">Delete</button>
+                        </div>
+                    </div>
+                `).join('');
+            },
+
+            async startScheduler() {
+                try {
+                    await API.post('/api/training/scheduler/start');
+                    Toast.success('Scheduler started');
+                    await this.loadData();
+                } catch (error) {
+                    Toast.error('Failed to start scheduler');
+                }
+            },
+
+            async stopScheduler() {
+                try {
+                    await API.post('/api/training/scheduler/stop');
+                    Toast.success('Scheduler stopped');
+                    await this.loadData();
+                } catch (error) {
+                    Toast.error('Failed to stop scheduler');
+                }
+            },
+
+            async runNow() {
+                try {
+                    Toast.info('Starting training run...');
+                    const result = await API.post('/api/training/run');
+                    if (result.success) {
+                        Toast.success(`Training completed: ${result.version}`);
+                    } else if (result.skipped) {
+                        Toast.warning(`Skipped: ${result.skip_reason}`);
+                    } else {
+                        Toast.error(`Training failed: ${result.error}`);
+                    }
+                    await this.loadData();
+                } catch (error) {
+                    Toast.error('Failed to run training');
+                }
+            },
+
+            showCreateABTest() {
+                Modal.show({
+                    title: 'Create A/B Test',
+                    body: `
+                        <div class="form-group">
+                            <label class="form-label">Version A</label>
+                            <input type="text" class="form-input" id="abTestVersionA" placeholder="e.g., v1.0.0">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Version B</label>
+                            <input type="text" class="form-input" id="abTestVersionB" placeholder="e.g., v1.1.0">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Traffic Split (0-1)</label>
+                            <input type="number" class="form-input" id="abTestSplit" value="0.5" min="0" max="1" step="0.1">
+                        </div>
+                    `,
+                    footer: `
+                        <button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
+                        <button class="btn btn-primary" onclick="TrainingPanel.createABTest()">Create</button>
+                    `
+                });
+            },
+
+            async createABTest() {
+                const versionA = document.getElementById('abTestVersionA').value;
+                const versionB = document.getElementById('abTestVersionB').value;
+                const split = parseFloat(document.getElementById('abTestSplit').value);
+
+                if (!versionA || !versionB) {
+                    Toast.error('Please enter both versions');
+                    return;
+                }
+
+                try {
+                    await API.post('/api/training/ab-tests', {
+                        version_a: versionA,
+                        version_b: versionB,
+                        traffic_split: split
+                    });
+                    Modal.close();
+                    Toast.success('A/B test created');
+                    await this.loadData();
+                } catch (error) {
+                    Toast.error('Failed to create test');
+                }
+            },
+
+            async completeABTest(testId) {
+                try {
+                    await API.post(`/api/training/ab-tests/${testId}/complete`);
+                    Toast.success('Test completed');
+                    await this.loadData();
+                } catch (error) {
+                    Toast.error('Failed to complete test');
+                }
+            },
+
+            async deleteABTest(testId) {
+                if (!confirm('Are you sure you want to delete this test?')) return;
+                try {
+                    await API.delete(`/api/training/ab-tests/${testId}`);
+                    Toast.success('Test deleted');
+                    await this.loadData();
+                } catch (error) {
+                    Toast.error('Failed to delete test');
+                }
+            }
+        };
+
+        // ============================================
+        // SECTION 12: Analytics Panel
+        // ============================================
+        const AnalyticsPanel = {
+            initialized: false,
+            currentPeriod: 7,
+            charts: {},
+
+            async init() {
+                if (!this.initialized) {
+                    await this.loadData();
+                    this.initialized = true;
+                }
+            },
+
+            async refresh() {
+                await this.loadData();
+                Toast.success('Analytics refreshed');
+            },
+
+            async onPeriodChange(days) {
+                this.currentPeriod = days;
+
+                // Update button states
+                document.querySelectorAll('.period-btn').forEach(btn => {
+                    btn.classList.toggle('active', parseInt(btn.dataset.days) === days);
+                });
+
+                await this.loadData();
+            },
+
+            async loadData() {
+                try {
+                    const data = await API.get(`/api/analytics/dashboard?days=${this.currentPeriod}`);
+                    this.renderStats(data.metrics);
+                    this.renderConversationsChart(data.daily_conversations);
+                    this.renderLatencyChart(data.latency_by_version);
+                    this.renderToolUsageChart(data.tool_usage);
+                    this.renderFeedbackChart(data.feedback_trends);
+                } catch (error) {
+                    console.error('Failed to load analytics:', error);
+                }
+            },
+
+            renderStats(metrics) {
+                document.getElementById('analyticsConversations').textContent = metrics.total_conversations || 0;
+                document.getElementById('analyticsLatency').textContent = metrics.avg_latency_ms || '-';
+                document.getElementById('analyticsFeedback').textContent =
+                    metrics.positive_feedback_rate ? `${metrics.positive_feedback_rate}%` : '-';
+                document.getElementById('analyticsTools').textContent = metrics.total_tool_invocations || 0;
+            },
+
+            renderConversationsChart(data) {
+                const ctx = document.getElementById('conversationsChart');
+                if (!ctx) return;
+
+                if (this.charts.conversations) {
+                    this.charts.conversations.destroy();
+                }
+
+                this.charts.conversations = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: data.map(d => d.date.slice(5)),
+                        datasets: [{
+                            label: 'Conversations',
+                            data: data.map(d => d.count),
+                            borderColor: 'rgba(0, 212, 255, 1)',
+                            backgroundColor: 'rgba(0, 212, 255, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#888' } },
+                            x: { grid: { display: false }, ticks: { color: '#888' } }
+                        }
+                    }
+                });
+            },
+
+            renderLatencyChart(data) {
+                const ctx = document.getElementById('latencyChart');
+                if (!ctx) return;
+
+                if (this.charts.latency) {
+                    this.charts.latency.destroy();
+                }
+
+                this.charts.latency = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: data.map(d => d.version),
+                        datasets: [{
+                            label: 'Avg Latency (ms)',
+                            data: data.map(d => d.avg_latency),
+                            backgroundColor: 'rgba(123, 44, 191, 0.6)',
+                            borderColor: 'rgba(123, 44, 191, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#888' } },
+                            x: { grid: { display: false }, ticks: { color: '#888' } }
+                        }
+                    }
+                });
+            },
+
+            renderToolUsageChart(data) {
+                const ctx = document.getElementById('toolUsageChart');
+                if (!ctx) return;
+
+                if (this.charts.toolUsage) {
+                    this.charts.toolUsage.destroy();
+                }
+
+                const colors = [
+                    'rgba(0, 212, 255, 0.8)',
+                    'rgba(123, 44, 191, 0.8)',
+                    'rgba(0, 255, 136, 0.8)',
+                    'rgba(255, 170, 0, 0.8)',
+                    'rgba(255, 68, 68, 0.8)',
+                    'rgba(136, 136, 136, 0.8)'
+                ];
+
+                this.charts.toolUsage = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: data.map(d => d.tool),
+                        datasets: [{
+                            data: data.map(d => d.count),
+                            backgroundColor: colors.slice(0, data.length),
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: { color: '#888', font: { size: 11 } }
+                            }
+                        }
+                    }
+                });
+            },
+
+            renderFeedbackChart(data) {
+                const ctx = document.getElementById('feedbackChart');
+                if (!ctx) return;
+
+                if (this.charts.feedback) {
+                    this.charts.feedback.destroy();
+                }
+
+                this.charts.feedback = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: data.map(d => d.date.slice(5)),
+                        datasets: [
+                            {
+                                label: 'Positive',
+                                data: data.map(d => d.positive),
+                                borderColor: 'rgba(0, 255, 136, 1)',
+                                backgroundColor: 'rgba(0, 255, 136, 0.1)',
+                                fill: true,
+                                tension: 0.4
+                            },
+                            {
+                                label: 'Negative',
+                                data: data.map(d => d.negative),
+                                borderColor: 'rgba(255, 68, 68, 1)',
+                                backgroundColor: 'rgba(255, 68, 68, 0.1)',
+                                fill: true,
+                                tension: 0.4
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'top',
+                                labels: { color: '#888' }
+                            }
+                        },
+                        scales: {
+                            y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: '#888' } },
+                            x: { grid: { display: false }, ticks: { color: '#888' } }
+                        }
+                    }
+                });
+            }
+        };
+
+        // ============================================
+        // SECTION 13: Integrations Panel
+        // ============================================
+        const IntegrationsPanel = {
+            initialized: false,
+
+            async init() {
+                if (!this.initialized) {
+                    await this.loadData();
+                    this.initialized = true;
+                }
+            },
+
+            async refresh() {
+                await this.loadData();
+                Toast.success('Integrations refreshed');
+            },
+
+            async loadData() {
+                try {
+                    const data = await API.get('/api/integrations/status');
+                    this.renderIntegrations(data.integrations);
+                } catch (error) {
+                    document.getElementById('integrationsList').innerHTML =
+                        '<div class="empty-state">Failed to load integrations</div>';
+                }
+            },
+
+            renderIntegrations(integrations) {
+                const container = document.getElementById('integrationsList');
+
+                if (!integrations || integrations.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No integrations available</div>';
+                    return;
+                }
+
+                container.innerHTML = integrations.map(i => `
+                    <div class="integration-card">
+                        <div class="integration-info">
+                            <div class="integration-icon">${i.icon}</div>
+                            <div class="integration-details">
+                                <h4>${i.name}</h4>
+                                <p>${i.description}</p>
+                                ${i.config_hint ? `<div class="config-hint">${i.config_hint}</div>` : ''}
+                            </div>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 16px;">
+                            <span class="integration-status ${i.status.replace('_', '-')}">${this.getStatusLabel(i.status)}</span>
+                            <div class="integration-actions">
+                                <button class="btn btn-secondary btn-sm" onclick="IntegrationsPanel.testConnection('${i.id}')" ${!i.configured ? 'disabled' : ''}>
+                                    Test
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+            },
+
+            getStatusLabel(status) {
+                switch(status) {
+                    case 'connected': return 'Connected';
+                    case 'disabled': return 'Disabled';
+                    case 'not_configured': return 'Not Configured';
+                    default: return status;
+                }
+            },
+
+            async testConnection(integrationId) {
+                try {
+                    Toast.info('Testing connection...');
+                    const result = await API.post(`/api/integrations/${integrationId}/test`);
+
+                    if (result.status === 'success') {
+                        Toast.success(result.message);
+                    } else if (result.status === 'warning') {
+                        Toast.warning(result.message);
+                    } else {
+                        Toast.error(result.message);
+                    }
+                } catch (error) {
+                    Toast.error('Connection test failed');
+                }
+            }
+        };
+
+        // ============================================
+        // SECTION 14: Status Panel
         // ============================================
         const StatusPanel = {
             initialized: false,
@@ -2577,11 +3649,14 @@
                     }
                 }
 
-                // Ctrl+1-6: Switch panels
-                if (e.ctrlKey && e.key >= '1' && e.key <= '6') {
+                // Ctrl+1-9: Switch panels
+                if (e.ctrlKey && e.key >= '1' && e.key <= '9') {
                     e.preventDefault();
-                    const panels = ['chat', 'memory', 'rag', 'workflows', 'status', 'settings'];
-                    Navigation.goto(panels[parseInt(e.key) - 1]);
+                    const panels = ['chat', 'memory', 'rag', 'workflows', 'training', 'analytics', 'integrations', 'status', 'settings'];
+                    const index = parseInt(e.key) - 1;
+                    if (index < panels.length) {
+                        Navigation.goto(panels[index]);
+                    }
                 }
 
                 // Ctrl+L: Clear chat

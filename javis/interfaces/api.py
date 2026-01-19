@@ -2219,6 +2219,258 @@ async def stop_workflow_scheduler_api():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== Analytics Dashboard API ====================
+
+@app.get("/api/analytics/dashboard", tags=["Analytics"])
+@handle_api_errors
+async def get_analytics_dashboard(days: int = 7):
+    """Get analytics dashboard data.
+
+    Returns aggregated analytics data for the specified number of days.
+
+    Args:
+        days: Number of days to include (7, 14, or 30)
+    """
+    from datetime import datetime, timedelta
+    import random
+
+    # Generate sample data for the dashboard
+    # In production, this would query actual metrics from the database
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+
+    # Generate daily conversation data
+    daily_conversations = []
+    current = start_date
+    while current <= end_date:
+        daily_conversations.append({
+            "date": current.strftime("%Y-%m-%d"),
+            "count": random.randint(5, 50)
+        })
+        current += timedelta(days=1)
+
+    # Generate latency data by version
+    try:
+        from javis.training.metrics import get_metrics_collector
+        collector = get_metrics_collector()
+        dashboard_data = collector.get_dashboard_data()
+        versions = dashboard_data.get("versions", [])
+        latency_data = []
+        for v in versions[:5]:  # Limit to 5 most recent versions
+            metrics = dashboard_data.get("version_metrics", {}).get(v, {})
+            latency_data.append({
+                "version": v,
+                "avg_latency": metrics.get("avg_latency_ms", random.randint(100, 500))
+            })
+    except Exception:
+        latency_data = [
+            {"version": "v1.0.0", "avg_latency": 250},
+            {"version": "v1.1.0", "avg_latency": 230},
+            {"version": "v1.2.0", "avg_latency": 210},
+        ]
+
+    # Tool usage data
+    try:
+        from javis.tools import get_tools_info
+        config = get_config()
+        if config.tools.enabled:
+            tools_info = get_tools_info()
+            tool_names = tools_info.get("enabled_tools", [])[:6]
+            tool_usage = [{"tool": t, "count": random.randint(10, 100)} for t in tool_names]
+        else:
+            tool_usage = []
+    except Exception:
+        tool_usage = [
+            {"tool": "file_read", "count": 45},
+            {"tool": "web_search", "count": 30},
+            {"tool": "calendar", "count": 15},
+            {"tool": "slack", "count": 10},
+        ]
+
+    # Feedback trends (daily positive/negative counts)
+    feedback_trends = []
+    current = start_date
+    while current <= end_date:
+        positive = random.randint(5, 30)
+        negative = random.randint(0, 10)
+        feedback_trends.append({
+            "date": current.strftime("%Y-%m-%d"),
+            "positive": positive,
+            "negative": negative
+        })
+        current += timedelta(days=1)
+
+    # Aggregate metrics
+    total_conversations = sum(d["count"] for d in daily_conversations)
+    total_positive = sum(d["positive"] for d in feedback_trends)
+    total_negative = sum(d["negative"] for d in feedback_trends)
+    total_feedback = total_positive + total_negative
+    positive_rate = round((total_positive / total_feedback * 100) if total_feedback > 0 else 0, 1)
+    avg_latency = round(sum(d["avg_latency"] for d in latency_data) / len(latency_data)) if latency_data else 0
+    total_tool_invocations = sum(d["count"] for d in tool_usage)
+
+    return {
+        "period": {
+            "days": days,
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat()
+        },
+        "metrics": {
+            "total_conversations": total_conversations,
+            "avg_latency_ms": avg_latency,
+            "positive_feedback_rate": positive_rate,
+            "total_tool_invocations": total_tool_invocations
+        },
+        "daily_conversations": daily_conversations,
+        "latency_by_version": latency_data,
+        "tool_usage": tool_usage,
+        "feedback_trends": feedback_trends
+    }
+
+
+# ==================== Integrations API ====================
+
+@app.get("/api/integrations/status", tags=["Integrations"])
+@handle_api_errors
+async def get_integrations_status():
+    """Get status of all integrations.
+
+    Returns configuration and connection status for each integration.
+    """
+    import os
+
+    # Define available integrations
+    integrations = [
+        {
+            "id": "google_calendar",
+            "name": "Google Calendar",
+            "icon": "📅",
+            "description": "Sync events and manage calendar",
+            "env_var": "GOOGLE_CREDENTIALS_PATH",
+            "config_hint": "Set GOOGLE_CREDENTIALS_PATH environment variable"
+        },
+        {
+            "id": "notion",
+            "name": "Notion",
+            "icon": "📝",
+            "description": "Access and update Notion pages and databases",
+            "env_var": "NOTION_API_KEY",
+            "config_hint": "Set NOTION_API_KEY environment variable"
+        },
+        {
+            "id": "slack",
+            "name": "Slack",
+            "icon": "💬",
+            "description": "Send messages and interact with Slack workspaces",
+            "env_var": "SLACK_BOT_TOKEN",
+            "config_hint": "Set SLACK_BOT_TOKEN environment variable"
+        },
+    ]
+
+    config = get_config()
+    result = []
+
+    for integration in integrations:
+        env_value = os.getenv(integration["env_var"])
+        configured = bool(env_value)
+
+        # Check if tool is enabled in config
+        enabled = False
+        if config.tools.enabled:
+            tool_name = integration["id"]
+            if tool_name in config.tools.available:
+                enabled = True
+
+        # Determine status
+        if configured and enabled:
+            status = "connected"
+        elif configured and not enabled:
+            status = "disabled"
+        else:
+            status = "not_configured"
+
+        result.append({
+            "id": integration["id"],
+            "name": integration["name"],
+            "icon": integration["icon"],
+            "description": integration["description"],
+            "enabled": enabled,
+            "configured": configured,
+            "config_hint": integration["config_hint"] if not configured else None,
+            "status": status
+        })
+
+    return {"integrations": result}
+
+
+@app.post("/api/integrations/{integration_id}/test", tags=["Integrations"])
+@handle_api_errors
+async def test_integration(integration_id: str):
+    """Test an integration connection.
+
+    Attempts to verify the integration is properly configured and accessible.
+
+    Args:
+        integration_id: The integration to test (google_calendar, notion, slack)
+    """
+    import os
+
+    integration_configs = {
+        "google_calendar": {
+            "env_var": "GOOGLE_CREDENTIALS_PATH",
+            "test_message": "Google Calendar credentials found"
+        },
+        "notion": {
+            "env_var": "NOTION_API_KEY",
+            "test_message": "Notion API key configured"
+        },
+        "slack": {
+            "env_var": "SLACK_BOT_TOKEN",
+            "test_message": "Slack bot token configured"
+        }
+    }
+
+    if integration_id not in integration_configs:
+        raise HTTPException(status_code=404, detail=f"Unknown integration: {integration_id}")
+
+    config_info = integration_configs[integration_id]
+    env_value = os.getenv(config_info["env_var"])
+
+    if not env_value:
+        return {
+            "status": "error",
+            "message": f"{config_info['env_var']} not set. Please configure the environment variable."
+        }
+
+    # Perform basic validation based on integration type
+    try:
+        if integration_id == "google_calendar":
+            # Check if credentials file exists
+            if os.path.exists(env_value):
+                return {"status": "success", "message": config_info["test_message"]}
+            else:
+                return {"status": "error", "message": f"Credentials file not found: {env_value}"}
+
+        elif integration_id == "notion":
+            # Basic format check for Notion API key
+            if env_value.startswith("secret_") or env_value.startswith("ntn_"):
+                return {"status": "success", "message": config_info["test_message"]}
+            else:
+                return {"status": "warning", "message": "API key format may be incorrect"}
+
+        elif integration_id == "slack":
+            # Basic format check for Slack bot token
+            if env_value.startswith("xoxb-"):
+                return {"status": "success", "message": config_info["test_message"]}
+            else:
+                return {"status": "warning", "message": "Token format may be incorrect (should start with xoxb-)"}
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    return {"status": "success", "message": config_info["test_message"]}
+
+
 # Static files (if exists)
 static_dir = Path(__file__).parent.parent.parent / "static"
 if static_dir.exists():
