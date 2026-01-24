@@ -3,23 +3,81 @@
 import functools
 import logging
 import os
+import time
+import uuid
 import aiofiles
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from pathlib import Path
-from typing import Any, Callable, List, Optional, TypeVar
+from typing import Annotated, Any, Callable, List, Optional, TypeVar
 
 # Type variable for generic decorator
 T = TypeVar("T")
 
 api_logger = logging.getLogger(__name__)
 
+# Import custom exceptions
+from javis.utils.exceptions import (
+    JAVISException,
+    ResourceNotFoundError,
+    ModelNotAvailableError,
+    ValidationError as JAVISValidationError,
+)
+
+# Import authentication
+from javis.interfaces.auth import (
+    AuthConfig,
+    UserInfo,
+    TokenResponse,
+    get_current_user,
+    get_current_user_optional,
+    get_admin_user,
+    create_access_token,
+    get_auth_status,
+)
+
+# Import schemas
+from javis.interfaces.schemas import (
+    ErrorResponse,
+    HealthResponse,
+    LivenessResponse,
+    DetailedHealthResponse,
+    SystemStatusResponse,
+    ReadinessResponse,
+    ChatRequest as ChatRequestSchema,
+    ChatResponse as ChatResponseSchema,
+    SessionClearResponse,
+    FeedbackResponse,
+    ModelsResponse,
+    ToolsInfoResponse,
+    MemoryStatsResponse,
+    RAGStatsResponse,
+    AnalyticsDashboardResponse,
+    IntegrationsStatusResponse,
+    UploadResponse,
+)
+from javis.utils.health import (
+    get_health_checker,
+    initialize_health_checks,
+    HealthStatus,
+)
+from javis.utils.rate_limiter import (
+    RateLimitMiddleware,
+    create_default_rules,
+    RATE_LIMIT_PROFILES,
+)
+
 from javis.utils.config import load_config, get_config
 from javis.utils.constants import DEFAULT_CORS_ORIGINS, EnvVars
+from javis.utils.logging_config import (
+    set_request_context,
+    clear_request_context,
+    setup_logging,
+)
 from javis.models.client import ModelClient, Message
 from javis.models.local_client import (
     LocalModelClient,
@@ -54,6 +112,7 @@ def handle_api_errors(func: Callable[..., T]) -> Callable[..., T]:
     """
     API 엔드포인트의 공통 에러 핸들링 데코레이터.
 
+    - JAVISException은 적절한 HTTP 응답으로 변환
     - HTTPException은 그대로 전달
     - ValueError -> 400 Bad Request
     - FileNotFoundError -> 404 Not Found
@@ -64,6 +123,11 @@ def handle_api_errors(func: Callable[..., T]) -> Callable[..., T]:
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
+        except JAVISException as e:
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=e.to_dict()
+            )
         except HTTPException:
             raise
         except ValueError as e:
@@ -79,6 +143,16 @@ def handle_api_errors(func: Callable[..., T]) -> Callable[..., T]:
                 detail=f"Internal server error: {type(e).__name__}"
             )
     return wrapper
+
+
+# --- Global Exception Handler ---
+
+async def javis_exception_handler(request: Request, exc: JAVISException) -> JSONResponse:
+    """Global exception handler for JAVISException."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_dict(),
+    )
 
 
 def require_feature(feature_path: str, error_message: str = None):
@@ -148,6 +222,10 @@ async def lifespan(app: FastAPI):
     load_config()
     config = get_config()
 
+    # Initialize health checker with all component checks
+    initialize_health_checks(config)
+    logger.info("Health checker initialized")
+
     # Initialize tools if enabled
     if config.tools.enabled:
         initialize_tools(config.tools.available)
@@ -169,6 +247,10 @@ async def lifespan(app: FastAPI):
 
 # API Tags for documentation organization
 tags_metadata = [
+    {
+        "name": "Auth",
+        "description": "Authentication and authorization endpoints",
+    },
     {
         "name": "Chat",
         "description": "Chat endpoints for conversing with JAVIS",
@@ -206,6 +288,14 @@ tags_metadata = [
         "description": "Workflow automation",
     },
     {
+        "name": "Analytics",
+        "description": "Analytics and metrics dashboard",
+    },
+    {
+        "name": "Integrations",
+        "description": "External service integrations",
+    },
+    {
         "name": "Health",
         "description": "Health check and status endpoints",
     },
@@ -227,7 +317,12 @@ JAVIS is a personal AI assistant with custom fine-tuned models and integrated to
 - **Workflow automation**: Scheduled tasks and triggers
 
 ### Authentication
-Currently no authentication is required. For production, configure CORS and add API key authentication.
+Authentication can be enabled via environment variables:
+- `JAVIS_AUTH_ENABLED=true` - Enable authentication
+- `JAVIS_API_KEY=your-api-key` - Simple API key authentication
+- `JAVIS_JWT_SECRET=your-secret` - JWT authentication (requires pyjwt package)
+
+When enabled, include the API key in the `X-API-Key` header or use Bearer token.
 """,
     version="0.1.0",
     lifespan=lifespan,
@@ -235,7 +330,17 @@ Currently no authentication is required. For production, configure CORS and add 
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    responses={
+        400: {"model": ErrorResponse, "description": "Bad Request"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        403: {"model": ErrorResponse, "description": "Forbidden"},
+        404: {"model": ErrorResponse, "description": "Not Found"},
+        500: {"model": ErrorResponse, "description": "Internal Server Error"},
+    },
 )
+
+# Register global exception handler
+app.add_exception_handler(JAVISException, javis_exception_handler)
 
 # CORS 설정 - 환경변수로 허용 도메인 관리
 # CORS_ORIGINS 환경변수: 쉼표로 구분된 도메인 목록 (예: "https://example.com,https://app.example.com")
@@ -255,8 +360,87 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Session-ID"],
+    allow_headers=["Content-Type", "Authorization", "X-Session-ID", "X-Request-ID"],
 )
+
+# Rate Limiting 설정
+# JAVIS_RATE_LIMIT_ENABLED 환경변수로 활성화/비활성화 (기본값: true)
+# JAVIS_RATE_LIMIT_WHITELIST 환경변수로 화이트리스트 IP 설정 (쉼표 구분)
+def _get_rate_limit_config() -> tuple[bool, list[str]]:
+    """환경변수에서 Rate Limiting 설정을 가져옵니다."""
+    enabled = os.getenv("JAVIS_RATE_LIMIT_ENABLED", "true").lower() in ("true", "1", "yes")
+    whitelist_env = os.getenv("JAVIS_RATE_LIMIT_WHITELIST", "").strip()
+    whitelist = [ip.strip() for ip in whitelist_env.split(",") if ip.strip()] if whitelist_env else []
+    return enabled, whitelist
+
+_rate_limit_enabled, _rate_limit_whitelist = _get_rate_limit_config()
+
+app.add_middleware(
+    RateLimitMiddleware,
+    default_limit=RATE_LIMIT_PROFILES["standard"],
+    rules=create_default_rules(),
+    whitelist=_rate_limit_whitelist,
+    enabled=_rate_limit_enabled,
+)
+
+
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    """Middleware to add request context for structured logging."""
+    # Generate or get request ID
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+
+    # Get session ID from header if available
+    session_id = request.headers.get("X-Session-ID")
+
+    # Set logging context
+    set_request_context(request_id=request_id, session_id=session_id)
+
+    # Log request start
+    start_time = time.time()
+    api_logger.info(
+        f"Request started: {request.method} {request.url.path}",
+        extra={
+            "http_method": request.method,
+            "http_path": request.url.path,
+            "client_ip": request.client.host if request.client else None,
+        },
+    )
+
+    try:
+        response = await call_next(request)
+
+        # Log request completion
+        duration_ms = (time.time() - start_time) * 1000
+        api_logger.info(
+            f"Request completed: {request.method} {request.url.path} - {response.status_code}",
+            extra={
+                "http_method": request.method,
+                "http_path": request.url.path,
+                "http_status": response.status_code,
+                "duration_ms": round(duration_ms, 2),
+            },
+        )
+
+        # Add request ID to response headers
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        api_logger.error(
+            f"Request failed: {request.method} {request.url.path} - {type(e).__name__}: {e}",
+            extra={
+                "http_method": request.method,
+                "http_path": request.url.path,
+                "error_type": type(e).__name__,
+                "duration_ms": round(duration_ms, 2),
+            },
+            exc_info=True,
+        )
+        raise
+    finally:
+        clear_request_context()
 
 
 def get_or_create_session(session_id: str) -> list[Message]:
@@ -335,18 +519,152 @@ async def root():
     return {"message": "JAVIS API is running", "docs": "/docs"}
 
 
-@app.get("/health", tags=["Health"])
-async def health():
-    """Simple health check endpoint.
+# ==================== Authentication API ====================
 
-    Returns a basic health status. For detailed status, use `/api/status`.
+class LoginRequest(BaseModel):
+    """Login request for token generation."""
+    username: str
+    password: str
+
+
+@app.get("/api/auth/status", tags=["Auth"])
+async def get_authentication_status():
+    """Get authentication configuration status.
+
+    Returns information about how authentication is configured.
     """
-    return {"status": "healthy"}
+    return get_auth_status()
+
+
+@app.post("/api/auth/token", response_model=TokenResponse, tags=["Auth"])
+async def create_token(request: LoginRequest):
+    """Generate an access token.
+
+    This endpoint is for development/testing purposes.
+    In production, integrate with your identity provider.
+
+    **Note:** Only works when `JAVIS_AUTH_ENABLED=true`
+    """
+    if not AuthConfig.AUTH_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="Authentication is not enabled. Set JAVIS_AUTH_ENABLED=true"
+        )
+
+    # Simple username/password check (for development)
+    # In production, validate against your user database
+    admin_user = os.getenv("JAVIS_ADMIN_USER", "admin")
+    admin_pass = os.getenv("JAVIS_ADMIN_PASSWORD", "admin")
+
+    if request.username == admin_user and request.password == admin_pass:
+        token = create_access_token(
+            user_id=request.username,
+            role="admin",
+            permissions=["*"]
+        )
+        return TokenResponse(
+            access_token=token,
+            token_type="bearer",
+            expires_in=AuthConfig.JWT_EXPIRATION_HOURS * 3600
+        )
+
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid credentials"
+    )
+
+
+@app.get("/api/auth/me", tags=["Auth"])
+async def get_current_user_info(
+    user: Annotated[UserInfo, Depends(get_current_user)]
+):
+    """Get current authenticated user information.
+
+    Requires authentication when `JAVIS_AUTH_ENABLED=true`.
+    """
+    return {
+        "user_id": user.user_id,
+        "role": user.role,
+        "permissions": user.permissions,
+    }
+
+
+@app.get("/health", tags=["Health"], response_model=HealthResponse)
+async def health():
+    """Simple health check endpoint (liveness probe).
+
+    Returns a basic health status. For detailed status, use `/api/health`.
+    This endpoint is suitable for load balancer health checks.
+    """
+    checker = get_health_checker()
+    return {"status": "healthy" if checker.is_alive() else "unhealthy"}
+
+
+@app.get("/api/health", tags=["Health"], response_model=DetailedHealthResponse)
+async def detailed_health():
+    """Detailed health check endpoint.
+
+    Returns comprehensive health status of all JAVIS components including:
+    - Groq API connectivity
+    - Memory system status
+    - RAG system status
+    - Tools system status
+    - Storage system status
+    - Database connectivity (for cloud mode)
+
+    Each component includes:
+    - Status (healthy, degraded, unhealthy, unknown)
+    - Latency of health check
+    - Additional details specific to the component
+    """
+    checker = get_health_checker()
+    health = await checker.check_all(use_cache=False)
+    return health.to_dict()
+
+
+@app.get("/api/health/live", tags=["Health"], response_model=LivenessResponse)
+async def liveness_probe():
+    """Kubernetes-style liveness probe.
+
+    Returns 200 if the application process is running.
+    Use this for container orchestration liveness checks.
+    """
+    checker = get_health_checker()
+    return {
+        "alive": checker.is_alive(),
+        "uptime_seconds": checker.uptime_seconds,
+    }
+
+
+@app.get("/api/health/ready", tags=["Health"], response_model=ReadinessResponse)
+async def readiness_probe():
+    """Kubernetes-style readiness probe.
+
+    Returns 200 if the service is ready to accept traffic,
+    503 if not ready (e.g., still initializing or dependencies unavailable).
+    """
+    checker = get_health_checker()
+    is_ready, component_status = await checker.is_ready()
+
+    if is_ready:
+        return {
+            "ready": True,
+            "backends": component_status,
+        }
+
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "ready": False,
+            "backends": component_status,
+            "message": "Service not ready - no healthy components",
+        }
+    )
 
 
 @app.get("/api/status", tags=["Health"])
 async def get_system_status():
-    """Get detailed system status.
+    """Get detailed system status (legacy endpoint).
 
     Returns comprehensive status of all JAVIS subsystems including:
     - API key availability
@@ -356,6 +674,8 @@ async def get_system_status():
     - Training scheduler status
     - Voice system status
     - Workflow scheduler status
+
+    Note: Consider using `/api/health` for new integrations.
     """
     import sys
     from datetime import datetime
@@ -407,12 +727,14 @@ async def get_system_status():
     return status
 
 
-@app.get("/api/ready", tags=["Health"])
+@app.get("/api/ready", tags=["Health"], response_model=ReadinessResponse)
 async def readiness_check():
-    """Kubernetes-style readiness probe.
+    """Kubernetes-style readiness probe (legacy endpoint).
 
     Returns 200 if the service is ready to accept traffic,
     503 if not ready (e.g., still initializing).
+
+    Note: Consider using `/api/health/ready` for new integrations.
     """
     config = get_config()
 
@@ -431,7 +753,6 @@ async def readiness_check():
             }
         }
 
-    from fastapi import HTTPException
     raise HTTPException(
         status_code=503,
         detail="No model backend available"
