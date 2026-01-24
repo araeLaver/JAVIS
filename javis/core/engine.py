@@ -22,6 +22,15 @@ from javis.utils.constants import (
     Roles,
     FinishReasons,
 )
+from javis.utils.resilience import (
+    get_circuit_breaker,
+    CircuitBreakerConfig,
+    CircuitOpenError,
+    retry,
+    RetryConfig,
+    RESILIENCE_PROFILES,
+    CIRCUIT_BREAKER_PROFILES,
+)
 
 if TYPE_CHECKING:
     from javis.memory.manager import MemoryManager
@@ -284,7 +293,31 @@ class ChatEngine:
         return payload
 
     async def _call_groq_api(self, payload: dict[str, Any]) -> dict:
-        """Groq API를 호출합니다."""
+        """Groq API를 호출합니다 (Circuit Breaker 및 Retry 패턴 적용)."""
+        circuit_breaker = get_circuit_breaker(
+            "groq-api",
+            CIRCUIT_BREAKER_PROFILES["model_inference"]
+        )
+
+        async with circuit_breaker:
+            return await self._call_groq_api_with_retry(payload)
+
+    @retry(
+        max_attempts=3,
+        base_delay=1.0,
+        max_delay=30.0,
+        retryable_exceptions=(
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+        ),
+        non_retryable_exceptions=(
+            httpx.HTTPStatusError,  # Don't retry 4xx/5xx errors
+        ),
+    )
+    async def _call_groq_api_with_retry(self, payload: dict[str, Any]) -> dict:
+        """Groq API 호출 (재시도 로직 포함)."""
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 self.base_url,
@@ -362,6 +395,15 @@ class ChatEngine:
 
             try:
                 data = await self._call_groq_api(payload)
+            except CircuitOpenError as e:
+                logger.warning(f"Circuit breaker open: {e.circuit_name}")
+                retry_msg = ""
+                if e.retry_after:
+                    retry_msg = f" (약 {int(e.retry_after)}초 후 재시도 가능)"
+                return ChatResponse(
+                    content=f"서비스가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.{retry_msg}",
+                    finish_reason=FinishReasons.ERROR
+                )
             except httpx.HTTPStatusError as e:
                 logger.error(f"Groq API error: {e.response.status_code}")
                 return ChatResponse(
@@ -434,24 +476,23 @@ class ChatEngine:
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self.base_url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=Timeouts.DEFAULT_API
-                )
-                response.raise_for_status()
-                data = response.json()
+            data = await self._call_groq_api(payload)
 
             choice = data["choices"][0]
             return ChatResponse(
                 content=choice["message"].get("content", ""),
                 finish_reason=choice.get("finish_reason"),
                 usage=data.get("usage")
+            )
+
+        except CircuitOpenError as e:
+            logger.warning(f"Circuit breaker open in chat_simple: {e.circuit_name}")
+            retry_msg = ""
+            if e.retry_after:
+                retry_msg = f" (약 {int(e.retry_after)}초 후 재시도 가능)"
+            return ChatResponse(
+                content=f"서비스가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.{retry_msg}",
+                finish_reason=FinishReasons.ERROR
             )
 
         except Exception as e:

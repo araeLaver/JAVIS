@@ -445,6 +445,58 @@ async def check_database_connection() -> ComponentHealth:
         )
 
 
+def check_circuit_breakers() -> ComponentHealth:
+    """Check circuit breaker status for all registered circuits."""
+    try:
+        from javis.utils.resilience import CircuitBreakerRegistry, CircuitState
+
+        registry = CircuitBreakerRegistry()
+        all_status = registry.get_all_status()
+
+        if not all_status:
+            return ComponentHealth(
+                name="circuit_breakers",
+                status=HealthStatus.HEALTHY,
+                message="No circuit breakers registered",
+                details={"count": 0},
+            )
+
+        # Count circuits by state
+        states_count = {"closed": 0, "open": 0, "half_open": 0}
+        for name, status in all_status.items():
+            state = status.get("state", "unknown")
+            if state in states_count:
+                states_count[state] += 1
+
+        # Determine overall health
+        if states_count["open"] > 0:
+            overall_status = HealthStatus.DEGRADED
+            message = f"{states_count['open']} circuit(s) open"
+        elif states_count["half_open"] > 0:
+            overall_status = HealthStatus.DEGRADED
+            message = f"{states_count['half_open']} circuit(s) recovering"
+        else:
+            overall_status = HealthStatus.HEALTHY
+            message = f"All {states_count['closed']} circuit(s) healthy"
+
+        return ComponentHealth(
+            name="circuit_breakers",
+            status=overall_status,
+            message=message,
+            details={
+                "count": len(all_status),
+                "states": states_count,
+                "circuits": all_status,
+            },
+        )
+    except Exception as e:
+        return ComponentHealth(
+            name="circuit_breakers",
+            status=HealthStatus.UNKNOWN,
+            message=f"Error checking circuit breakers: {str(e)}",
+        )
+
+
 # Global health checker instance
 _health_checker: Optional[HealthChecker] = None
 
@@ -487,6 +539,10 @@ def initialize_health_checks(config) -> HealthChecker:
         "database",
         check_database_connection,
         is_async=True,
+    )
+    checker.register_check(
+        "circuit_breakers",
+        check_circuit_breakers,
     )
 
     return checker
