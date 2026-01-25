@@ -743,3 +743,273 @@ class TestCircuitOpenError:
         )
 
         assert error.retry_after is None
+
+
+class TestSyncRetryDecorator:
+    """Tests for sync retry decorator paths."""
+
+    def test_sync_retry_success(self):
+        """Test sync retry decorator success path."""
+        call_count = 0
+
+        @retry(max_attempts=3, base_delay=0.01)
+        def sync_success():
+            nonlocal call_count
+            call_count += 1
+            return "success"
+
+        result = sync_success()
+        assert result == "success"
+        assert call_count == 1
+
+    def test_sync_retry_with_retries(self):
+        """Test sync retry decorator with retries."""
+        call_count = 0
+
+        @retry(max_attempts=3, base_delay=0.01)
+        def sync_flaky():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise ConnectionError("Retry")
+            return "success"
+
+        result = sync_flaky()
+        assert result == "success"
+        assert call_count == 2
+
+    def test_sync_retry_max_attempts_exceeded(self):
+        """Test sync retry raises after max attempts."""
+        call_count = 0
+
+        @retry(max_attempts=2, base_delay=0.01)
+        def sync_always_fails():
+            nonlocal call_count
+            call_count += 1
+            raise ConnectionError("Always fails")
+
+        with pytest.raises(ConnectionError):
+            sync_always_fails()
+
+        assert call_count == 2
+
+    def test_sync_retry_non_retryable(self):
+        """Test sync retry with non-retryable exception."""
+        call_count = 0
+
+        @retry(
+            max_attempts=3,
+            base_delay=0.01,
+            non_retryable_exceptions=(ValueError,),
+        )
+        def sync_value_error():
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("Non-retryable")
+
+        with pytest.raises(ValueError):
+            sync_value_error()
+
+        assert call_count == 1
+
+    def test_sync_retry_on_retry_callback(self):
+        """Test sync retry on_retry callback."""
+        retries = []
+
+        def on_retry(exc, attempt):
+            retries.append((str(exc), attempt))
+
+        @retry(max_attempts=3, base_delay=0.01, on_retry=on_retry)
+        def sync_failing():
+            raise ConnectionError("Fail")
+
+        with pytest.raises(ConnectionError):
+            sync_failing()
+
+        assert len(retries) == 2
+        assert retries[0][1] == 1
+        assert retries[1][1] == 2
+
+
+class TestRetryAsyncAdvanced:
+    """Advanced tests for retry_async function."""
+
+    @pytest.mark.asyncio
+    async def test_retry_async_non_retryable_exception(self):
+        """Test retry_async with non-retryable exception."""
+        call_count = 0
+
+        async def raises_value_error():
+            nonlocal call_count
+            call_count += 1
+            raise ValueError("Non-retryable")
+
+        config = RetryConfig(
+            max_attempts=3,
+            base_delay=0.01,
+            non_retryable_exceptions=(ValueError,),
+        )
+
+        with pytest.raises(ValueError):
+            await retry_async(raises_value_error, config=config)
+
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_async_with_on_retry_callback(self):
+        """Test retry_async with on_retry callback."""
+        call_count = 0
+        retries = []
+
+        def on_retry(exc, attempt):
+            retries.append(attempt)
+
+        async def flaky_func():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("Retry")
+            return "success"
+
+        config = RetryConfig(max_attempts=5, base_delay=0.01)
+        result = await retry_async(flaky_func, config=config, on_retry=on_retry)
+
+        assert result == "success"
+        assert len(retries) == 2  # Called on attempts 1 and 2
+
+    @pytest.mark.asyncio
+    async def test_retry_async_exhausts_retries(self):
+        """Test retry_async raises last exception when exhausted."""
+        async def always_fails():
+            raise ConnectionError("Always fails")
+
+        config = RetryConfig(max_attempts=2, base_delay=0.01)
+
+        with pytest.raises(ConnectionError):
+            await retry_async(always_fails, config=config)
+
+
+class TestResilientDecoratorAdvanced:
+    """Advanced tests for resilient decorator."""
+
+    def setup_method(self):
+        """Reset registry before each test."""
+        CircuitBreakerRegistry._instance = None
+        CircuitBreakerRegistry._breakers = {}
+
+    @pytest.mark.asyncio
+    async def test_resilient_with_circuit_breaker_instance(self):
+        """Test resilient with circuit breaker instance (not name)."""
+        cb = CircuitBreaker("test-instance-cb")
+
+        @resilient(circuit_breaker=cb)
+        async def protected_func():
+            return "success"
+
+        result = await protected_func()
+        assert result == "success"
+
+    @pytest.mark.asyncio
+    async def test_resilient_without_cb_or_retry(self):
+        """Test resilient with only fallback."""
+        @resilient(fallback=lambda: "fallback")
+        async def simple_fail():
+            raise ValueError("Fail")
+
+        result = await simple_fail()
+        assert result == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_resilient_no_fallback_raises(self):
+        """Test resilient without fallback raises exception."""
+        @resilient()
+        async def raises_error():
+            raise ValueError("No fallback")
+
+        with pytest.raises(ValueError):
+            await raises_error()
+
+    def test_resilient_sync_function_success(self):
+        """Test resilient decorator on sync function."""
+        @resilient()
+        def sync_success():
+            return "sync success"
+
+        result = sync_success()
+        assert result == "sync success"
+
+    def test_resilient_sync_with_fallback(self):
+        """Test resilient sync function with fallback."""
+        @resilient(fallback=lambda: "sync fallback")
+        def sync_fail():
+            raise ValueError("Fail")
+
+        result = sync_fail()
+        assert result == "sync fallback"
+
+
+class TestCircuitBreakerTransitions:
+    """Tests for circuit breaker state transitions."""
+
+    @pytest.fixture
+    def breaker(self):
+        """Create a fast circuit breaker for testing."""
+        config = CircuitBreakerConfig(
+            failure_threshold=2,
+            success_threshold=1,
+            timeout=0.1,
+        )
+        return CircuitBreaker("transition-test", config)
+
+    @pytest.mark.asyncio
+    async def test_closed_to_open_to_half_open(self, breaker):
+        """Test full state transition cycle."""
+        # Start closed
+        assert breaker.is_closed
+
+        # Cause failures to open the circuit
+        for _ in range(2):
+            try:
+                async with breaker:
+                    raise ConnectionError("Fail")
+            except ConnectionError:
+                pass
+
+        # Should be open
+        assert breaker.is_open
+
+        # Wait for timeout
+        await asyncio.sleep(0.15)
+
+        # Should transition to half-open on next request
+        try:
+            async with breaker:
+                raise ConnectionError("Still failing")
+        except ConnectionError:
+            pass
+
+        # Should be back to open after failure in half-open
+        assert breaker.is_open
+
+    @pytest.mark.asyncio
+    async def test_half_open_to_closed(self, breaker):
+        """Test half-open to closed transition."""
+        # Open the circuit
+        for _ in range(2):
+            try:
+                async with breaker:
+                    raise ConnectionError("Fail")
+            except ConnectionError:
+                pass
+
+        assert breaker.is_open
+
+        # Wait for timeout
+        await asyncio.sleep(0.15)
+
+        # Succeed in half-open state
+        async with breaker:
+            pass
+
+        # Should be closed now
+        assert breaker.is_closed

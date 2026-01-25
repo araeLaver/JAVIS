@@ -37,7 +37,7 @@ class ServiceContainer:
     def __init__(self):
         self._services: dict[str, Any] = {}
         self._factories: dict[str, Callable[[], Any]] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # RLock to allow reentrant calls from factories
 
     def register_singleton(self, name: str, service: Any) -> None:
         """Register a singleton service instance.
@@ -152,7 +152,7 @@ class ServiceContainer:
 
 # Global container instance
 _container: Optional[ServiceContainer] = None
-_container_lock = threading.Lock()
+_container_lock = threading.RLock()
 
 
 def get_container() -> ServiceContainer:

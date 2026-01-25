@@ -461,6 +461,172 @@ class TestOTelAvailability:
             tracing_module._initialized = original_initialized
 
 
+class TestSetupFunctions:
+    """Tests for setup_fastapi_tracing and setup_httpx_tracing."""
+
+    def test_setup_fastapi_tracing_no_otel(self):
+        """Test setup_fastapi_tracing when OTEL not available."""
+        import javis.utils.tracing as tracing_module
+        from javis.utils.tracing import setup_fastapi_tracing
+
+        original_available = tracing_module.OTEL_AVAILABLE
+        tracing_module.OTEL_AVAILABLE = False
+
+        try:
+            mock_app = MagicMock()
+            setup_fastapi_tracing(mock_app)  # Should return early
+        finally:
+            tracing_module.OTEL_AVAILABLE = original_available
+
+    def test_setup_httpx_tracing_no_otel(self):
+        """Test setup_httpx_tracing when OTEL not available."""
+        import javis.utils.tracing as tracing_module
+        from javis.utils.tracing import setup_httpx_tracing
+
+        original_available = tracing_module.OTEL_AVAILABLE
+        tracing_module.OTEL_AVAILABLE = False
+
+        try:
+            setup_httpx_tracing()  # Should return early
+        finally:
+            tracing_module.OTEL_AVAILABLE = original_available
+
+    @pytest.mark.skipif(not OTEL_AVAILABLE, reason="OpenTelemetry not installed")
+    def test_setup_fastapi_tracing_import_error(self):
+        """Test setup_fastapi_tracing handles ImportError."""
+        import javis.utils.tracing as tracing_module
+        from javis.utils.tracing import setup_fastapi_tracing
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        tracing_module._tracer = MagicMock()
+        tracing_module._initialized = True
+
+        try:
+            with patch.dict("sys.modules", {"opentelemetry.instrumentation.fastapi": None}):
+                with patch("javis.utils.tracing.init_tracing"):
+                    mock_app = MagicMock()
+                    # This should catch ImportError
+                    setup_fastapi_tracing(mock_app)
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    @pytest.mark.skipif(not OTEL_AVAILABLE, reason="OpenTelemetry not installed")
+    def test_setup_httpx_tracing_import_error(self):
+        """Test setup_httpx_tracing handles ImportError."""
+        import javis.utils.tracing as tracing_module
+        from javis.utils.tracing import setup_httpx_tracing
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        tracing_module._tracer = MagicMock()
+        tracing_module._initialized = True
+
+        try:
+            with patch.dict("sys.modules", {"opentelemetry.instrumentation.httpx": None}):
+                # This should catch ImportError
+                setup_httpx_tracing()
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+
+class TestTracedDecoratorAdvanced:
+    """Advanced tests for traced decorator."""
+
+    def test_traced_with_exception(self):
+        """Test traced decorator records exceptions."""
+        import javis.utils.tracing as tracing_module
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        tracing_module._tracer = None
+        tracing_module._initialized = True
+
+        try:
+            @traced()
+            def failing_function():
+                raise ValueError("Test error")
+
+            with pytest.raises(ValueError):
+                failing_function()
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    @pytest.mark.asyncio
+    async def test_traced_async_with_exception(self):
+        """Test traced decorator records exceptions in async functions."""
+        import javis.utils.tracing as tracing_module
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        tracing_module._tracer = None
+        tracing_module._initialized = True
+
+        try:
+            @traced()
+            async def async_failing_function():
+                raise ValueError("Test async error")
+
+            with pytest.raises(ValueError):
+                await async_failing_function()
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_traced_with_self_argument(self):
+        """Test traced decorator skips self argument."""
+        import javis.utils.tracing as tracing_module
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        tracing_module._tracer = None
+        tracing_module._initialized = True
+
+        try:
+            class TestClass:
+                @traced(record_args=True)
+                def method(self, x, y):
+                    return x + y
+
+            obj = TestClass()
+            result = obj.method(2, 3)
+            assert result == 5
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_traced_with_cls_argument(self):
+        """Test traced decorator skips cls argument."""
+        import javis.utils.tracing as tracing_module
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        tracing_module._tracer = None
+        tracing_module._initialized = True
+
+        try:
+            class TestClass:
+                @classmethod
+                @traced(record_args=True)
+                def class_method(cls, value):
+                    return value * 2
+
+            result = TestClass.class_method(5)
+            assert result == 10
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+
 @pytest.mark.skipif(not OTEL_AVAILABLE, reason="OpenTelemetry not installed")
 class TestWithOTelInstalled:
     """Tests that require OpenTelemetry to be installed."""
@@ -528,6 +694,189 @@ class TestWithOTelInstalled:
             with create_span("test_span", attributes={"key": "value"}) as span:
                 assert not isinstance(span, NoOpSpan)
                 span.set_attribute("another_key", "another_value")
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_get_trace_id_with_valid_span(self):
+        """Test get_trace_id returns valid trace ID."""
+        import javis.utils.tracing as tracing_module
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        tracing_module._tracer = trace.get_tracer("test")
+        tracing_module._initialized = True
+
+        try:
+            with create_span("test_span") as span:
+                trace_id = get_trace_id()
+                assert trace_id is not None
+                assert len(trace_id) == 32  # 32 hex chars
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_get_span_id_with_valid_span(self):
+        """Test get_span_id returns valid span ID."""
+        import javis.utils.tracing as tracing_module
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        tracing_module._tracer = trace.get_tracer("test")
+        tracing_module._initialized = True
+
+        try:
+            with create_span("test_span") as span:
+                span_id = get_span_id()
+                assert span_id is not None
+                assert len(span_id) == 16  # 16 hex chars
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_add_span_attributes_with_real_span(self):
+        """Test add_span_attributes with real span."""
+        import javis.utils.tracing as tracing_module
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        tracing_module._tracer = trace.get_tracer("test")
+        tracing_module._initialized = True
+
+        try:
+            with create_span("test_span") as span:
+                add_span_attributes({"string_key": "value", "int_key": 42, "float_key": 3.14, "bool_key": True})
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_add_span_event_with_real_span(self):
+        """Test add_span_event with real span."""
+        import javis.utils.tracing as tracing_module
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        tracing_module._tracer = trace.get_tracer("test")
+        tracing_module._initialized = True
+
+        try:
+            with create_span("test_span") as span:
+                add_span_event("test_event", {"detail": "value"})
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_set_span_error_with_real_span(self):
+        """Test set_span_error with real span."""
+        import javis.utils.tracing as tracing_module
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        tracing_module._tracer = trace.get_tracer("test")
+        tracing_module._initialized = True
+
+        try:
+            with create_span("test_span") as span:
+                set_span_error(ValueError("Test error"))
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_traced_decorator_with_real_tracer(self):
+        """Test traced decorator with real tracer and record options."""
+        import javis.utils.tracing as tracing_module
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        tracing_module._tracer = trace.get_tracer("test")
+        tracing_module._initialized = True
+
+        try:
+            @traced(record_args=True, record_result=True)
+            def test_function(x, y):
+                return x + y
+
+            result = test_function(2, 3)
+            assert result == 5
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_create_span_with_exception(self):
+        """Test create_span records exception properly."""
+        import javis.utils.tracing as tracing_module
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        tracing_module._tracer = trace.get_tracer("test")
+        tracing_module._initialized = True
+
+        try:
+            with pytest.raises(ValueError):
+                with create_span("test_span") as span:
+                    raise ValueError("Test exception")
+        finally:
+            tracing_module._tracer = original_tracer
+            tracing_module._initialized = original_initialized
+
+    def test_extract_inject_trace_context(self):
+        """Test extract and inject trace context."""
+        import javis.utils.tracing as tracing_module
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        original_tracer = tracing_module._tracer
+        original_initialized = tracing_module._initialized
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        tracing_module._tracer = trace.get_tracer("test")
+        tracing_module._initialized = True
+
+        try:
+            with create_span("test_span") as span:
+                headers = {}
+                result = inject_trace_context(headers)
+                assert isinstance(result, dict)
+
+                # Extract from injected headers
+                context = extract_trace_context(result)
+                # Context should be extracted
         finally:
             tracing_module._tracer = original_tracer
             tracing_module._initialized = original_initialized
