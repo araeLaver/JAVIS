@@ -78,6 +78,14 @@ from javis.utils.metrics import (
     CHAT_REQUESTS,
     ERRORS_TOTAL,
 )
+from javis.utils.tracing import (
+    init_tracing,
+    setup_fastapi_tracing,
+    setup_httpx_tracing,
+    get_trace_id,
+    create_span,
+    add_span_attributes,
+)
 
 from javis.utils.config import load_config, get_config
 from javis.utils.constants import DEFAULT_CORS_ORIGINS, EnvVars
@@ -229,6 +237,12 @@ async def lifespan(app: FastAPI):
     # Startup
     load_config()
     config = get_config()
+
+    # Initialize distributed tracing
+    init_tracing()
+    setup_fastapi_tracing(app)
+    setup_httpx_tracing()
+    logger.info("Distributed tracing initialized")
 
     # Initialize health checker with all component checks
     initialize_health_checks(config)
@@ -421,6 +435,9 @@ async def logging_middleware(request: Request, call_next):
     # Get session ID from header if available
     session_id = request.headers.get("X-Session-ID")
 
+    # Get trace ID if available (from OpenTelemetry)
+    trace_id = get_trace_id()
+
     # Set logging context
     set_request_context(request_id=request_id, session_id=session_id)
 
@@ -440,6 +457,7 @@ async def logging_middleware(request: Request, call_next):
             "http_method": request.method,
             "http_path": request.url.path,
             "client_ip": request.client.host if request.client else None,
+            "trace_id": trace_id,
         },
     )
 
@@ -461,11 +479,14 @@ async def logging_middleware(request: Request, call_next):
                 "http_path": request.url.path,
                 "http_status": response.status_code,
                 "duration_ms": round(duration_ms, 2),
+                "trace_id": trace_id,
             },
         )
 
-        # Add request ID to response headers
+        # Add request ID and trace ID to response headers
         response.headers["X-Request-ID"] = request_id
+        if trace_id:
+            response.headers["X-Trace-ID"] = trace_id
         return response
 
     except Exception as e:
@@ -484,6 +505,7 @@ async def logging_middleware(request: Request, call_next):
                 "http_path": request.url.path,
                 "error_type": type(e).__name__,
                 "duration_ms": round(duration_ms, 2),
+                "trace_id": trace_id,
             },
             exc_info=True,
         )

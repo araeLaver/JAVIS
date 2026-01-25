@@ -38,6 +38,13 @@ from javis.utils.metrics import (
     MODEL_LATENCY,
     ERRORS_TOTAL,
 )
+from javis.utils.tracing import (
+    create_span,
+    traced,
+    add_span_attributes,
+    add_span_event,
+    set_span_error,
+)
 
 if TYPE_CHECKING:
     from javis.memory.manager import MemoryManager
@@ -328,24 +335,41 @@ class ChatEngine:
         import time
         start_time = time.time()
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                self.base_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=Timeouts.DEFAULT_API
-            )
-            response.raise_for_status()
-            result = response.json()
+        with create_span(
+            "groq.api.call",
+            attributes={
+                "model": self.model,
+                "max_tokens": payload.get("max_tokens"),
+                "temperature": payload.get("temperature"),
+                "has_tools": "tools" in payload,
+            }
+        ) as span:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    self.base_url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=Timeouts.DEFAULT_API
+                )
+                response.raise_for_status()
+                result = response.json()
 
-            # Record model latency
-            duration = time.time() - start_time
-            MODEL_LATENCY.observe(duration, labels={"model": self.model})
+                # Record model latency
+                duration = time.time() - start_time
+                MODEL_LATENCY.observe(duration, labels={"model": self.model})
 
-            return result
+                # Add response info to span
+                usage = result.get("usage", {})
+                span.set_attribute("response.status_code", response.status_code)
+                span.set_attribute("response.prompt_tokens", usage.get("prompt_tokens", 0))
+                span.set_attribute("response.completion_tokens", usage.get("completion_tokens", 0))
+                span.set_attribute("response.total_tokens", usage.get("total_tokens", 0))
+                span.set_attribute("response.duration_ms", round(duration * 1000, 2))
+
+                return result
 
     async def _process_tool_calls(
         self,
@@ -353,24 +377,43 @@ class ChatEngine:
         current_messages: list[dict]
     ) -> None:
         """도구 호출을 처리하고 결과를 메시지에 추가합니다."""
-        results = await self.executor.execute_parallel(tool_calls)
+        with create_span(
+            "tools.execute_batch",
+            attributes={"tool_count": len(tool_calls)}
+        ) as batch_span:
+            results = await self.executor.execute_parallel(tool_calls)
 
-        for call in tool_calls:
-            call_id = call["id"]
-            tool_name = call["function"]["name"]
-            result = results[call_id]
+            for call in tool_calls:
+                call_id = call["id"]
+                tool_name = call["function"]["name"]
+                result = results[call_id]
 
-            # Record tool execution metrics
-            status = "success" if result.success else "error"
-            TOOL_EXECUTIONS.inc(labels={"tool": tool_name, "status": status})
+                # Record tool execution metrics
+                status = "success" if result.success else "error"
+                TOOL_EXECUTIONS.inc(labels={"tool": tool_name, "status": status})
 
-            logger.info(f"Tool {tool_name} result: success={result.success}")
+                # Add event for each tool execution
+                add_span_event(
+                    f"tool.{tool_name}",
+                    {
+                        "tool_name": tool_name,
+                        "call_id": call_id,
+                        "success": result.success,
+                    }
+                )
 
-            current_messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": result.to_message_content()
-            })
+                logger.info(f"Tool {tool_name} result: success={result.success}")
+
+                current_messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": result.to_message_content()
+                })
+
+            # Set batch result attributes
+            success_count = sum(1 for r in results.values() if r.success)
+            batch_span.set_attribute("tools.success_count", success_count)
+            batch_span.set_attribute("tools.error_count", len(results) - success_count)
 
     async def chat_with_tools(
         self,
@@ -400,92 +443,119 @@ class ChatEngine:
             CHAT_REQUESTS.inc(labels={"model": self.model, "status": status})
             CHAT_LATENCY.observe(duration, labels={"model": self.model, "mode": tool_mode})
 
-        # 도구 스키마 준비
-        tools = None
-        if use_tools:
-            registry = get_registry()
-            tools = registry.get_openai_tools()
-            if not tools:
-                logger.warning("No tools enabled, proceeding without tools")
+        with create_span(
+            "chat.with_tools",
+            attributes={
+                "chat.model": self.model,
+                "chat.use_tools": use_tools,
+                "chat.message_count": len(messages),
+                "chat.temperature": temperature,
+                "chat.max_tokens": max_tokens,
+            }
+        ) as chat_span:
+            # 도구 스키마 준비
+            tools = None
+            if use_tools:
+                registry = get_registry()
+                tools = registry.get_openai_tools()
+                if not tools:
+                    logger.warning("No tools enabled, proceeding without tools")
+                else:
+                    chat_span.set_attribute("chat.available_tools", len(tools))
 
-        # Message 객체를 dict로 변환 및 컨텍스트 강화
-        current_messages = [
-            {"role": m.role, "content": m.content}
-            for m in messages
-        ]
-        current_messages = await self._enhance_with_context(current_messages)
+            # Message 객체를 dict로 변환 및 컨텍스트 강화
+            current_messages = [
+                {"role": m.role, "content": m.content}
+                for m in messages
+            ]
+            current_messages = await self._enhance_with_context(current_messages)
+            add_span_event("context_enhanced", {"message_count": len(current_messages)})
 
-        # 도구 호출 루프
-        for iteration in range(1, self.max_tool_iterations + 1):
-            payload = self._build_api_payload(
-                current_messages, tools, temperature, max_tokens
+            # 도구 호출 루프
+            for iteration in range(1, self.max_tool_iterations + 1):
+                payload = self._build_api_payload(
+                    current_messages, tools, temperature, max_tokens
+                )
+                logger.debug(f"Tool iteration {iteration}")
+                add_span_event(f"iteration_{iteration}_start", {"iteration": iteration})
+
+                try:
+                    data = await self._call_groq_api(payload)
+                except CircuitOpenError as e:
+                    logger.warning(f"Circuit breaker open: {e.circuit_name}")
+                    _record_metrics("circuit_open")
+                    ERRORS_TOTAL.inc(labels={"type": "CircuitOpenError", "component": "chat_engine"})
+                    set_span_error(e)
+                    chat_span.set_attribute("chat.status", "circuit_open")
+                    retry_msg = ""
+                    if e.retry_after:
+                        retry_msg = f" (약 {int(e.retry_after)}초 후 재시도 가능)"
+                    return ChatResponse(
+                        content=f"서비스가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.{retry_msg}",
+                        finish_reason=FinishReasons.ERROR
+                    )
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"Groq API error: {e.response.status_code}")
+                    _record_metrics("api_error")
+                    ERRORS_TOTAL.inc(labels={"type": "HTTPStatusError", "component": "chat_engine"})
+                    set_span_error(e)
+                    chat_span.set_attribute("chat.status", "api_error")
+                    return ChatResponse(
+                        content=f"API 오류가 발생했습니다: {e.response.status_code}",
+                        finish_reason=FinishReasons.ERROR
+                    )
+                except httpx.TimeoutException as e:
+                    logger.error("Groq API timeout")
+                    _record_metrics("timeout")
+                    ERRORS_TOTAL.inc(labels={"type": "TimeoutException", "component": "chat_engine"})
+                    set_span_error(e)
+                    chat_span.set_attribute("chat.status", "timeout")
+                    return ChatResponse(
+                        content="API 요청 시간이 초과되었습니다.",
+                        finish_reason=FinishReasons.ERROR
+                    )
+                except Exception as e:
+                    logger.exception("Unexpected error in chat_with_tools")
+                    _record_metrics("error")
+                    ERRORS_TOTAL.inc(labels={"type": type(e).__name__, "component": "chat_engine"})
+                    set_span_error(e)
+                    chat_span.set_attribute("chat.status", "error")
+                    return ChatResponse(
+                        content=f"오류가 발생했습니다: {str(e)}",
+                        finish_reason=FinishReasons.ERROR
+                    )
+
+                choice = data["choices"][0]
+                message = choice["message"]
+
+                # 도구 호출이 없으면 최종 응답 반환
+                if not message.get("tool_calls"):
+                    _record_metrics("success")
+                    chat_span.set_attribute("chat.status", "success")
+                    chat_span.set_attribute("chat.iterations", iteration)
+                    chat_span.set_attribute("chat.finish_reason", choice.get("finish_reason"))
+                    return ChatResponse(
+                        content=message.get("content", ""),
+                        finish_reason=choice.get("finish_reason"),
+                        usage=data.get("usage")
+                    )
+
+                # 도구 호출 처리
+                tool_calls = message["tool_calls"]
+                logger.info(f"Processing {len(tool_calls)} tool calls")
+
+                current_messages.append(message)
+                await self._process_tool_calls(tool_calls, current_messages)
+
+            # 최대 반복 횟수 도달
+            logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
+            _record_metrics("max_iterations")
+            chat_span.set_attribute("chat.status", "max_iterations")
+            chat_span.set_attribute("chat.iterations", self.max_tool_iterations)
+            return ChatResponse(
+                content=f"도구 호출이 최대 횟수({self.max_tool_iterations})에 도달했습니다.",
+                finish_reason=FinishReasons.MAX_ITERATIONS
             )
-            logger.debug(f"Tool iteration {iteration}")
-
-            try:
-                data = await self._call_groq_api(payload)
-            except CircuitOpenError as e:
-                logger.warning(f"Circuit breaker open: {e.circuit_name}")
-                _record_metrics("circuit_open")
-                ERRORS_TOTAL.inc(labels={"type": "CircuitOpenError", "component": "chat_engine"})
-                retry_msg = ""
-                if e.retry_after:
-                    retry_msg = f" (약 {int(e.retry_after)}초 후 재시도 가능)"
-                return ChatResponse(
-                    content=f"서비스가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.{retry_msg}",
-                    finish_reason=FinishReasons.ERROR
-                )
-            except httpx.HTTPStatusError as e:
-                logger.error(f"Groq API error: {e.response.status_code}")
-                _record_metrics("api_error")
-                ERRORS_TOTAL.inc(labels={"type": "HTTPStatusError", "component": "chat_engine"})
-                return ChatResponse(
-                    content=f"API 오류가 발생했습니다: {e.response.status_code}",
-                    finish_reason=FinishReasons.ERROR
-                )
-            except httpx.TimeoutException:
-                logger.error("Groq API timeout")
-                _record_metrics("timeout")
-                ERRORS_TOTAL.inc(labels={"type": "TimeoutException", "component": "chat_engine"})
-                return ChatResponse(
-                    content="API 요청 시간이 초과되었습니다.",
-                    finish_reason=FinishReasons.ERROR
-                )
-            except Exception as e:
-                logger.exception("Unexpected error in chat_with_tools")
-                _record_metrics("error")
-                ERRORS_TOTAL.inc(labels={"type": type(e).__name__, "component": "chat_engine"})
-                return ChatResponse(
-                    content=f"오류가 발생했습니다: {str(e)}",
-                    finish_reason=FinishReasons.ERROR
-                )
-
-            choice = data["choices"][0]
-            message = choice["message"]
-
-            # 도구 호출이 없으면 최종 응답 반환
-            if not message.get("tool_calls"):
-                _record_metrics("success")
-                return ChatResponse(
-                    content=message.get("content", ""),
-                    finish_reason=choice.get("finish_reason"),
-                    usage=data.get("usage")
-                )
-
-            # 도구 호출 처리
-            tool_calls = message["tool_calls"]
-            logger.info(f"Processing {len(tool_calls)} tool calls")
-
-            current_messages.append(message)
-            await self._process_tool_calls(tool_calls, current_messages)
-
-        # 최대 반복 횟수 도달
-        logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
-        _record_metrics("max_iterations")
-        return ChatResponse(
-            content=f"도구 호출이 최대 횟수({self.max_tool_iterations})에 도달했습니다.",
-            finish_reason=FinishReasons.MAX_ITERATIONS
-        )
 
     async def chat_simple(
         self,
@@ -512,47 +582,62 @@ class ChatEngine:
             CHAT_REQUESTS.inc(labels={"model": self.model, "status": status})
             CHAT_LATENCY.observe(duration, labels={"model": self.model, "mode": "simple"})
 
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": m.role, "content": m.content}
-                for m in messages
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
+        with create_span(
+            "chat.simple",
+            attributes={
+                "chat.model": self.model,
+                "chat.message_count": len(messages),
+                "chat.temperature": temperature,
+                "chat.max_tokens": max_tokens,
+            }
+        ) as chat_span:
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": m.role, "content": m.content}
+                    for m in messages
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
 
-        try:
-            data = await self._call_groq_api(payload)
+            try:
+                data = await self._call_groq_api(payload)
 
-            choice = data["choices"][0]
-            _record_metrics("success")
-            return ChatResponse(
-                content=choice["message"].get("content", ""),
-                finish_reason=choice.get("finish_reason"),
-                usage=data.get("usage")
-            )
+                choice = data["choices"][0]
+                _record_metrics("success")
+                chat_span.set_attribute("chat.status", "success")
+                chat_span.set_attribute("chat.finish_reason", choice.get("finish_reason"))
+                return ChatResponse(
+                    content=choice["message"].get("content", ""),
+                    finish_reason=choice.get("finish_reason"),
+                    usage=data.get("usage")
+                )
 
-        except CircuitOpenError as e:
-            logger.warning(f"Circuit breaker open in chat_simple: {e.circuit_name}")
-            _record_metrics("circuit_open")
-            ERRORS_TOTAL.inc(labels={"type": "CircuitOpenError", "component": "chat_engine"})
-            retry_msg = ""
-            if e.retry_after:
-                retry_msg = f" (약 {int(e.retry_after)}초 후 재시도 가능)"
-            return ChatResponse(
-                content=f"서비스가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.{retry_msg}",
-                finish_reason=FinishReasons.ERROR
-            )
+            except CircuitOpenError as e:
+                logger.warning(f"Circuit breaker open in chat_simple: {e.circuit_name}")
+                _record_metrics("circuit_open")
+                ERRORS_TOTAL.inc(labels={"type": "CircuitOpenError", "component": "chat_engine"})
+                set_span_error(e)
+                chat_span.set_attribute("chat.status", "circuit_open")
+                retry_msg = ""
+                if e.retry_after:
+                    retry_msg = f" (약 {int(e.retry_after)}초 후 재시도 가능)"
+                return ChatResponse(
+                    content=f"서비스가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.{retry_msg}",
+                    finish_reason=FinishReasons.ERROR
+                )
 
-        except Exception as e:
-            logger.exception("Error in chat_simple")
-            _record_metrics("error")
-            ERRORS_TOTAL.inc(labels={"type": type(e).__name__, "component": "chat_engine"})
-            return ChatResponse(
-                content=f"오류가 발생했습니다: {str(e)}",
-                finish_reason=FinishReasons.ERROR
-            )
+            except Exception as e:
+                logger.exception("Error in chat_simple")
+                _record_metrics("error")
+                ERRORS_TOTAL.inc(labels={"type": type(e).__name__, "component": "chat_engine"})
+                set_span_error(e)
+                chat_span.set_attribute("chat.status", "error")
+                return ChatResponse(
+                    content=f"오류가 발생했습니다: {str(e)}",
+                    finish_reason=FinishReasons.ERROR
+                )
 
     async def store_conversation_to_memory(
         self,
