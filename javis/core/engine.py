@@ -31,6 +31,13 @@ from javis.utils.resilience import (
     RESILIENCE_PROFILES,
     CIRCUIT_BREAKER_PROFILES,
 )
+from javis.utils.metrics import (
+    CHAT_REQUESTS,
+    CHAT_LATENCY,
+    TOOL_EXECUTIONS,
+    MODEL_LATENCY,
+    ERRORS_TOTAL,
+)
 
 if TYPE_CHECKING:
     from javis.memory.manager import MemoryManager
@@ -318,6 +325,9 @@ class ChatEngine:
     )
     async def _call_groq_api_with_retry(self, payload: dict[str, Any]) -> dict:
         """Groq API 호출 (재시도 로직 포함)."""
+        import time
+        start_time = time.time()
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 self.base_url,
@@ -329,7 +339,13 @@ class ChatEngine:
                 timeout=Timeouts.DEFAULT_API
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+
+            # Record model latency
+            duration = time.time() - start_time
+            MODEL_LATENCY.observe(duration, labels={"model": self.model})
+
+            return result
 
     async def _process_tool_calls(
         self,
@@ -343,6 +359,10 @@ class ChatEngine:
             call_id = call["id"]
             tool_name = call["function"]["name"]
             result = results[call_id]
+
+            # Record tool execution metrics
+            status = "success" if result.success else "error"
+            TOOL_EXECUTIONS.inc(labels={"tool": tool_name, "status": status})
 
             logger.info(f"Tool {tool_name} result: success={result.success}")
 
@@ -371,6 +391,15 @@ class ChatEngine:
         Returns:
             최종 ChatResponse
         """
+        import time
+        start_time = time.time()
+        tool_mode = "with_tools" if use_tools else "simple"
+
+        def _record_metrics(status: str) -> None:
+            duration = time.time() - start_time
+            CHAT_REQUESTS.inc(labels={"model": self.model, "status": status})
+            CHAT_LATENCY.observe(duration, labels={"model": self.model, "mode": tool_mode})
+
         # 도구 스키마 준비
         tools = None
         if use_tools:
@@ -397,6 +426,8 @@ class ChatEngine:
                 data = await self._call_groq_api(payload)
             except CircuitOpenError as e:
                 logger.warning(f"Circuit breaker open: {e.circuit_name}")
+                _record_metrics("circuit_open")
+                ERRORS_TOTAL.inc(labels={"type": "CircuitOpenError", "component": "chat_engine"})
                 retry_msg = ""
                 if e.retry_after:
                     retry_msg = f" (약 {int(e.retry_after)}초 후 재시도 가능)"
@@ -406,18 +437,24 @@ class ChatEngine:
                 )
             except httpx.HTTPStatusError as e:
                 logger.error(f"Groq API error: {e.response.status_code}")
+                _record_metrics("api_error")
+                ERRORS_TOTAL.inc(labels={"type": "HTTPStatusError", "component": "chat_engine"})
                 return ChatResponse(
                     content=f"API 오류가 발생했습니다: {e.response.status_code}",
                     finish_reason=FinishReasons.ERROR
                 )
             except httpx.TimeoutException:
                 logger.error("Groq API timeout")
+                _record_metrics("timeout")
+                ERRORS_TOTAL.inc(labels={"type": "TimeoutException", "component": "chat_engine"})
                 return ChatResponse(
                     content="API 요청 시간이 초과되었습니다.",
                     finish_reason=FinishReasons.ERROR
                 )
             except Exception as e:
                 logger.exception("Unexpected error in chat_with_tools")
+                _record_metrics("error")
+                ERRORS_TOTAL.inc(labels={"type": type(e).__name__, "component": "chat_engine"})
                 return ChatResponse(
                     content=f"오류가 발생했습니다: {str(e)}",
                     finish_reason=FinishReasons.ERROR
@@ -428,6 +465,7 @@ class ChatEngine:
 
             # 도구 호출이 없으면 최종 응답 반환
             if not message.get("tool_calls"):
+                _record_metrics("success")
                 return ChatResponse(
                     content=message.get("content", ""),
                     finish_reason=choice.get("finish_reason"),
@@ -443,6 +481,7 @@ class ChatEngine:
 
         # 최대 반복 횟수 도달
         logger.warning(f"Max tool iterations ({self.max_tool_iterations}) reached")
+        _record_metrics("max_iterations")
         return ChatResponse(
             content=f"도구 호출이 최대 횟수({self.max_tool_iterations})에 도달했습니다.",
             finish_reason=FinishReasons.MAX_ITERATIONS
@@ -465,6 +504,14 @@ class ChatEngine:
         Returns:
             ChatResponse
         """
+        import time
+        start_time = time.time()
+
+        def _record_metrics(status: str) -> None:
+            duration = time.time() - start_time
+            CHAT_REQUESTS.inc(labels={"model": self.model, "status": status})
+            CHAT_LATENCY.observe(duration, labels={"model": self.model, "mode": "simple"})
+
         payload = {
             "model": self.model,
             "messages": [
@@ -479,6 +526,7 @@ class ChatEngine:
             data = await self._call_groq_api(payload)
 
             choice = data["choices"][0]
+            _record_metrics("success")
             return ChatResponse(
                 content=choice["message"].get("content", ""),
                 finish_reason=choice.get("finish_reason"),
@@ -487,6 +535,8 @@ class ChatEngine:
 
         except CircuitOpenError as e:
             logger.warning(f"Circuit breaker open in chat_simple: {e.circuit_name}")
+            _record_metrics("circuit_open")
+            ERRORS_TOTAL.inc(labels={"type": "CircuitOpenError", "component": "chat_engine"})
             retry_msg = ""
             if e.retry_after:
                 retry_msg = f" (약 {int(e.retry_after)}초 후 재시도 가능)"
@@ -497,6 +547,8 @@ class ChatEngine:
 
         except Exception as e:
             logger.exception("Error in chat_simple")
+            _record_metrics("error")
+            ERRORS_TOTAL.inc(labels={"type": type(e).__name__, "component": "chat_engine"})
             return ChatResponse(
                 content=f"오류가 발생했습니다: {str(e)}",
                 finish_reason=FinishReasons.ERROR

@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from pathlib import Path
 from typing import Annotated, Any, Callable, List, Optional, TypeVar
@@ -69,6 +69,14 @@ from javis.utils.rate_limiter import (
     RateLimitMiddleware,
     create_default_rules,
     RATE_LIMIT_PROFILES,
+)
+from javis.utils.metrics import (
+    get_registry,
+    REQUEST_COUNT,
+    REQUEST_LATENCY,
+    REQUEST_IN_PROGRESS,
+    CHAT_REQUESTS,
+    ERRORS_TOTAL,
 )
 
 from javis.utils.config import load_config, get_config
@@ -384,9 +392,29 @@ app.add_middleware(
 )
 
 
+def _normalize_path(path: str) -> str:
+    """Normalize path for metrics to avoid high cardinality.
+
+    Examples:
+        /api/chat -> /api/chat
+        /api/sessions/abc123 -> /api/sessions/{session_id}
+        /api/memory/mem-uuid-here -> /api/memory/{memory_id}
+    """
+    import re
+    # Normalize UUID patterns
+    path = re.sub(r'/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '/{id}', path)
+    # Normalize session IDs (alphanumeric)
+    path = re.sub(r'/sessions/[a-zA-Z0-9_-]+', '/sessions/{session_id}', path)
+    # Normalize memory IDs
+    path = re.sub(r'/memory/[a-zA-Z0-9_-]+', '/memory/{memory_id}', path)
+    # Normalize document IDs
+    path = re.sub(r'/documents/[a-zA-Z0-9_-]+', '/documents/{document_id}', path)
+    return path
+
+
 @app.middleware("http")
 async def logging_middleware(request: Request, call_next):
-    """Middleware to add request context for structured logging."""
+    """Middleware to add request context for structured logging and metrics."""
     # Generate or get request ID
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
 
@@ -395,6 +423,14 @@ async def logging_middleware(request: Request, call_next):
 
     # Set logging context
     set_request_context(request_id=request_id, session_id=session_id)
+
+    # Prepare metrics labels
+    method = request.method
+    endpoint = _normalize_path(request.url.path)
+    labels = {"method": method, "endpoint": endpoint}
+
+    # Track in-progress requests
+    REQUEST_IN_PROGRESS.inc(labels=labels)
 
     # Log request start
     start_time = time.time()
@@ -410,8 +446,14 @@ async def logging_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
 
+        # Record metrics
+        duration_seconds = time.time() - start_time
+        status_labels = {**labels, "status": str(response.status_code)}
+        REQUEST_COUNT.inc(labels=status_labels)
+        REQUEST_LATENCY.observe(duration_seconds, labels=labels)
+
         # Log request completion
-        duration_ms = (time.time() - start_time) * 1000
+        duration_ms = duration_seconds * 1000
         api_logger.info(
             f"Request completed: {request.method} {request.url.path} - {response.status_code}",
             extra={
@@ -427,7 +469,14 @@ async def logging_middleware(request: Request, call_next):
         return response
 
     except Exception as e:
-        duration_ms = (time.time() - start_time) * 1000
+        # Record error metrics
+        duration_seconds = time.time() - start_time
+        error_labels = {**labels, "status": "500"}
+        REQUEST_COUNT.inc(labels=error_labels)
+        REQUEST_LATENCY.observe(duration_seconds, labels=labels)
+        ERRORS_TOTAL.inc(labels={"type": type(e).__name__, "component": "api"})
+
+        duration_ms = duration_seconds * 1000
         api_logger.error(
             f"Request failed: {request.method} {request.url.path} - {type(e).__name__}: {e}",
             extra={
@@ -440,6 +489,7 @@ async def logging_middleware(request: Request, call_next):
         )
         raise
     finally:
+        REQUEST_IN_PROGRESS.dec(labels=labels)
         clear_request_context()
 
 
@@ -659,6 +709,44 @@ async def readiness_probe():
             "backends": component_status,
             "message": "Service not ready - no healthy components",
         }
+    )
+
+
+@app.get(
+    "/metrics",
+    tags=["Health"],
+    response_class=PlainTextResponse,
+    summary="Prometheus metrics endpoint",
+)
+async def prometheus_metrics():
+    """Export metrics in Prometheus text format.
+
+    This endpoint is used by Prometheus to scrape application metrics.
+    Returns metrics in the standard Prometheus exposition format.
+
+    Metrics include:
+    - HTTP request counts, latencies, and in-progress requests
+    - Chat request statistics
+    - Tool execution counts
+    - Model inference timing
+    - Circuit breaker status
+    - Error counts by type
+    - Memory and RAG operation metrics
+    - Cache hit/miss ratios
+
+    Example Prometheus scrape config:
+    ```yaml
+    scrape_configs:
+      - job_name: 'javis'
+        static_configs:
+          - targets: ['localhost:8000']
+        metrics_path: '/metrics'
+    ```
+    """
+    registry = get_registry()
+    return PlainTextResponse(
+        content=registry.export_prometheus(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
 
