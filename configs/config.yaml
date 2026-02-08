@@ -143,6 +143,34 @@ training:
     min_sample_size: 100         # 최소 샘플 크기
     significance_threshold: 0.95 # 통계적 유의성 임계값
 
+  # MLOps: MLflow 실험 추적
+  mlflow:
+    enabled: false               # MLflow 활성화 여부
+    tracking_uri: "http://localhost:5000"  # MLflow 서버 URI
+    experiment_name: "javis-training"      # 실험 이름
+    artifact_location: null      # 아티팩트 저장 경로 (null = 기본값)
+    log_models: true             # 모델 자동 로깅
+    log_datasets: true           # 데이터셋 정보 로깅
+    log_system_metrics: true     # 시스템 메트릭 로깅
+
+  # MLOps: Optuna 하이퍼파라미터 최적화
+  optuna:
+    enabled: false               # HPO 활성화 여부
+    study_name: "javis-hpo"      # 스터디 이름
+    storage_uri: null            # 스터디 저장소 (null = 메모리)
+    n_trials: 20                 # 시도 횟수
+    timeout: null                # 시간 제한 (초, null = 무제한)
+    direction: "minimize"        # 최적화 방향 (minimize/maximize)
+    pruner: "median"             # 프루너 (median/hyperband/nop)
+    sampler: "tpe"               # 샘플러 (tpe/random/cmaes)
+    # 탐색 공간
+    learning_rate_min: 0.00001   # 학습률 최소값
+    learning_rate_max: 0.001     # 학습률 최대값
+    batch_size_choices: [2, 4, 8]      # 배치 크기 후보
+    lora_r_choices: [16, 32, 64, 128]  # LoRA rank 후보
+    epochs_min: 1                # 에폭 최소값
+    epochs_max: 5                # 에폭 최대값
+
 # Phase 6: 음성 인터페이스 설정
 voice:
   enabled: true

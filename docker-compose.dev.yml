@@ -1,0 +1,38 @@
+# JAVIS Docker Compose - Development Overrides
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      # Mount source code for hot reload
+      - ./javis:/app/javis:ro
+      - ./tests:/app/tests:ro
+      - ./configs:/app/configs:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - JAVIS_ENV=development
+      - JAVIS_DEBUG=true
+      - PYTHONDONTWRITEBYTECODE=1
+    command: uvicorn javis.interfaces.api:app --reload --host 0.0.0.0 --port 8000
+
+  # Development database with relaxed settings
+  postgres:
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    ports:
+      - "5432:5432"
+
+  # Redis without persistence for faster restarts
+  redis:
+    command: redis-server --appendonly no
+
+  # MLflow with debug logging
+  mlflow:
+    environment:
+      - MLFLOW_DEBUG=true

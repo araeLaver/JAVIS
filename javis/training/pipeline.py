@@ -12,13 +12,14 @@ from javis.storage import get_conversation_store
 from javis.storage.base import ConversationStoreInterface
 from javis.utils.config import TrainingConfig, get_config
 
-from .ab_testing import ABTestManager, get_ab_test_manager
-from .data_quality import DataQualityScorer, get_quality_scorer
-from .notifications import NotificationService, get_notifier
-from .preference_data import PreferenceDataGenerator, get_preference_generator
-from .remote import RemoteTrainer, TrainingResult
-from .validation import ModelValidator, get_validator
-from .version_manager import VersionManager, get_version_manager
+from .ab_testing import get_ab_test_manager
+from .data_quality import get_quality_scorer
+from .mlflow_tracker import MLflowConfig, get_mlflow_tracker
+from .notifications import get_notifier
+from .preference_data import get_preference_generator
+from .remote import RemoteTrainer
+from .validation import get_validator
+from .version_manager import get_version_manager
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,18 @@ class TrainingPipeline:
         self.model_validator = get_validator()
         self.ab_test_manager = get_ab_test_manager()
         self.preference_generator = get_preference_generator()
+
+        # MLflow tracker (MLOps)
+        mlflow_config = MLflowConfig(
+            enabled=config.mlflow.enabled,
+            tracking_uri=config.mlflow.tracking_uri,
+            experiment_name=config.mlflow.experiment_name,
+            artifact_location=config.mlflow.artifact_location,
+            log_models=config.mlflow.log_models,
+            log_datasets=config.mlflow.log_datasets,
+            log_system_metrics=config.mlflow.log_system_metrics,
+        )
+        self.mlflow_tracker = get_mlflow_tracker(mlflow_config)
 
     @property
     def conversation_store(self) -> ConversationStoreInterface:
@@ -351,7 +364,7 @@ class TrainingPipeline:
                     error="No training data after export",
                 )
 
-            # Phase 3: Run training
+            # Phase 3: Run training with MLflow tracking
             logger.info(f"Starting remote training with {dataset_size} conversations...")
             training_config = {
                 "base_model": self.config.model.base_model,
@@ -364,37 +377,74 @@ class TrainingPipeline:
                 "gradient_accumulation_steps": self.config.model.gradient_accumulation_steps,
             }
 
-            result = self.remote_trainer.train(data_path, training_config)
+            # Start MLflow run for experiment tracking
+            run_name = f"sft-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            with self.mlflow_tracker.start_run(
+                run_name=run_name,
+                tags={"method": "sft", "provider": self.config.provider},
+                description=f"SFT training with {dataset_size} conversations",
+            ) as mlflow_run_id:
+                # Log training configuration
+                self.mlflow_tracker.log_training_config(training_config)
+                self.mlflow_tracker.log_dataset(data_path, "training_data", "training")
+                self.mlflow_tracker.log_metrics({"dataset_size": dataset_size})
 
-            if not result.success:
-                logger.error(f"Training failed: {result.error}")
-                self.notifier.notify_failure(result.error or "Unknown error", {
-                    "version": result.version,
-                    "dataset_size": dataset_size,
-                })
-                return PipelineResult(
-                    success=False,
-                    version=result.version,
-                    error=result.error,
-                    dataset_size=dataset_size,
-                )
+                result = self.remote_trainer.train(data_path, training_config)
 
-            # Phase 4: Validate model
-            logger.info("Validating trained model...")
-            if result.adapter_path and not self.validate_model(
-                result.adapter_path, result.version
-            ):
-                logger.error("Model validation failed")
-                self.version_manager.mark_failed(result.version)
-                self.notifier.notify_failure("Model validation failed", {
-                    "version": result.version,
-                })
-                return PipelineResult(
-                    success=False,
-                    version=result.version,
-                    error="Model validation failed",
-                    dataset_size=dataset_size,
-                )
+                if not result.success:
+                    logger.error(f"Training failed: {result.error}")
+                    self.mlflow_tracker.set_tag("status", "failed")
+                    self.mlflow_tracker.log_params({"error": result.error or "Unknown"})
+                    self.notifier.notify_failure(result.error or "Unknown error", {
+                        "version": result.version,
+                        "dataset_size": dataset_size,
+                        "mlflow_run_id": mlflow_run_id,
+                    })
+                    return PipelineResult(
+                        success=False,
+                        version=result.version,
+                        error=result.error,
+                        dataset_size=dataset_size,
+                    )
+
+                # Log training metrics from result
+                if result.metadata:
+                    metrics_to_log = {
+                        k: v for k, v in result.metadata.items()
+                        if isinstance(v, (int, float))
+                    }
+                    if metrics_to_log:
+                        self.mlflow_tracker.log_metrics(metrics_to_log)
+
+                # Phase 4: Validate model
+                logger.info("Validating trained model...")
+                if result.adapter_path and not self.validate_model(
+                    result.adapter_path, result.version
+                ):
+                    logger.error("Model validation failed")
+                    self.mlflow_tracker.set_tag("status", "validation_failed")
+                    self.version_manager.mark_failed(result.version)
+                    self.notifier.notify_failure("Model validation failed", {
+                        "version": result.version,
+                        "mlflow_run_id": mlflow_run_id,
+                    })
+                    return PipelineResult(
+                        success=False,
+                        version=result.version,
+                        error="Model validation failed",
+                        dataset_size=dataset_size,
+                    )
+
+                # Log model artifacts
+                if result.adapter_path:
+                    self.mlflow_tracker.log_model(
+                        result.adapter_path,
+                        model_name="lora_adapter",
+                        registered_name=f"javis-{result.version}" if self.config.mlflow.log_models else None,
+                    )
+
+                self.mlflow_tracker.set_tag("status", "success")
+                self.mlflow_tracker.log_params({"version": result.version})
 
             # Phase 5: Create version
             logger.info(f"Creating version {result.version}...")
@@ -402,6 +452,8 @@ class TrainingPipeline:
                 metadata = result.metadata.copy()
                 metadata["dataset_size"] = dataset_size
                 metadata["training_config"] = training_config
+                if mlflow_run_id:
+                    metadata["mlflow_run_id"] = mlflow_run_id
 
                 self.version_manager.create_version(
                     result.adapter_path, metadata, result.version
@@ -447,6 +499,9 @@ class TrainingPipeline:
             if ab_test_id:
                 notify_metadata["ab_test_id"] = ab_test_id
                 notify_metadata["ab_test_enabled"] = True
+            if mlflow_run_id:
+                notify_metadata["mlflow_run_id"] = mlflow_run_id
+                notify_metadata["mlflow_url"] = self.mlflow_tracker.get_run_url()
 
             self.notifier.notify_success(result.version, notify_metadata)
 

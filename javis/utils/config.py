@@ -160,6 +160,39 @@ class DPOTrainingConfig(BaseModel):
     max_response_length: int = 1024
 
 
+# MLOps Configuration Classes
+class MLflowConfig(BaseModel):
+    """MLflow experiment tracking configuration."""
+
+    enabled: bool = False
+    tracking_uri: str = "http://localhost:5000"
+    experiment_name: str = "javis-training"
+    artifact_location: str | None = None
+    log_models: bool = True
+    log_datasets: bool = True
+    log_system_metrics: bool = True
+
+
+class OptunaConfig(BaseModel):
+    """Optuna hyperparameter optimization configuration."""
+
+    enabled: bool = False
+    study_name: str = "javis-hpo"
+    storage_uri: str | None = None  # SQLite or PostgreSQL URI
+    n_trials: int = 20
+    timeout: int | None = None  # Seconds, None for no timeout
+    direction: str = "minimize"  # minimize or maximize
+    pruner: str = "median"  # median, hyperband, nop
+    sampler: str = "tpe"  # tpe, random, cmaes
+    # Search space bounds
+    learning_rate_min: float = 1e-5
+    learning_rate_max: float = 1e-3
+    batch_size_choices: list[int] = [2, 4, 8]
+    lora_r_choices: list[int] = [16, 32, 64, 128]
+    epochs_min: int = 1
+    epochs_max: int = 5
+
+
 class ToolsConfig(BaseModel):
     """Tools system configuration."""
 
@@ -315,6 +348,9 @@ class TrainingConfig(BaseModel):
     ab_testing: ABTestingConfig = ABTestingConfig()
     # Phase 6-5: DPO training
     dpo: DPOTrainingConfig = DPOTrainingConfig()
+    # MLOps additions
+    mlflow: MLflowConfig = MLflowConfig()
+    optuna: OptunaConfig = OptunaConfig()
 
 
 class AppConfig(BaseModel):
@@ -394,6 +430,14 @@ def load_config(config_path: str | Path | None = None) -> Config:
         weights=DataQualityWeightsConfig(**weights_data),
     )
 
+    # Parse MLflow config
+    mlflow_data = training_data.get("mlflow", {})
+    mlflow_config = MLflowConfig(**mlflow_data)
+
+    # Parse Optuna config
+    optuna_data = training_data.get("optuna", {})
+    optuna_config = OptunaConfig(**optuna_data)
+
     training_config = TrainingConfig(
         schedule=TrainingScheduleConfig(**training_data.get("schedule", {})),
         provider=training_data.get("provider", "modal"),
@@ -408,6 +452,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
         ab_testing=ABTestingConfig(**training_data.get("ab_testing", {})),
         # Phase 6-5: DPO config
         dpo=DPOTrainingConfig(**training_data.get("dpo", {})),
+        # MLOps configs
+        mlflow=mlflow_config,
+        optuna=optuna_config,
     )
 
     # Parse tools config if present

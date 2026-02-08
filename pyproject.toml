@@ -74,6 +74,12 @@ dev = [
     "mypy>=1.7.0",
 ]
 
+mlops = [
+    "mlflow>=2.10.0",
+    "optuna>=3.5.0",
+    "optuna-integration[mlflow]>=3.5.0",
+]
+
 [project.scripts]
 javis = "javis.__main__:main"
 
@@ -142,3 +148,7 @@ precision = 2
 
 [tool.coverage.html]
 directory = "htmlcov"
+
+[tool.bandit]
+exclude_dirs = ["tests", "venv", ".venv"]
+skips = ["B101", "B601"]  # Skip assert and shell injection in subprocess

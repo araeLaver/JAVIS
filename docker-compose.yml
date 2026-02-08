@@ -1,0 +1,215 @@
+# JAVIS Docker Compose Configuration
+# Production-ready multi-service setup
+
+version: "3.9"
+
+services:
+  # ==========================================================================
+  # JAVIS API Server
+  # ==========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: javis-api
+    ports:
+      - "8000:8000"
+    environment:
+      - JAVIS_STORAGE_MODE=${JAVIS_STORAGE_MODE:-local}
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://javis:javis@postgres:5432/javis
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - CHROMADB_HOST=chromadb
+      - CHROMADB_PORT=8000
+      # API Keys (from .env)
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - RUNPOD_API_KEY=${RUNPOD_API_KEY:-}
+      - RUNPOD_ENDPOINT_ID=${RUNPOD_ENDPOINT_ID:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - javis-network
+
+  # ==========================================================================
+  # Redis - Caching & Session Store
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: javis-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - javis-network
+
+  # ==========================================================================
+  # PostgreSQL - Main Database
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: javis-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=javis
+      - POSTGRES_PASSWORD=javis
+      - POSTGRES_DB=javis
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U javis -d javis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - javis-network
+
+  # ==========================================================================
+  # MLflow - Experiment Tracking
+  # ==========================================================================
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    container_name: javis-mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=postgresql://javis:javis@postgres:5432/mlflow
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://javis:javis@postgres:5432/mlflow
+      --default-artifact-root /mlflow/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - javis-network
+
+  # ==========================================================================
+  # ChromaDB - Vector Database
+  # ==========================================================================
+  chromadb:
+    image: chromadb/chroma:0.4.22
+    container_name: javis-chromadb
+    ports:
+      - "8001:8000"
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - ANONYMIZED_TELEMETRY=false
+      - ALLOW_RESET=false
+    volumes:
+      - chromadb-data:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - javis-network
+
+  # ==========================================================================
+  # Prometheus - Metrics Collection (Optional)
+  # ==========================================================================
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: javis-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    profiles:
+      - monitoring
+    restart: unless-stopped
+    networks:
+      - javis-network
+
+  # ==========================================================================
+  # Grafana - Metrics Visualization (Optional)
+  # ==========================================================================
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: javis-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+    restart: unless-stopped
+    networks:
+      - javis-network
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  javis-network:
+    driver: bridge
+    name: javis-network
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  redis-data:
+    name: javis-redis-data
+  postgres-data:
+    name: javis-postgres-data
+  mlflow-artifacts:
+    name: javis-mlflow-artifacts
+  chromadb-data:
+    name: javis-chromadb-data
+  prometheus-data:
+    name: javis-prometheus-data
+  grafana-data:
+    name: javis-grafana-data
