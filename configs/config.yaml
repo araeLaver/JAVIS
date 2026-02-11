@@ -6,9 +6,9 @@ app:
   description: "Personal AI Assistant"
 
 model:
-  # RunPod Serverless Endpoint
-  provider: runpod
-  # endpoint_id는 .env에서 로드
+  # Groq API (무료 tier)
+  provider: groq
+  # API 키는 .env에서 로드
 
   # 베이스 모델 정보
   base_model: "Qwen/Qwen2.5-7B-Instruct"
@@ -51,14 +51,14 @@ tools:
 # Phase 4: Memory & RAG System
 memory:
   long_term:
-    enabled: true
+    enabled: false
     db_path: "./data/vectors/memory"
     collection_name: "javis_memory"
     embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
     summarize_after_turns: 10
 
 rag:
-  enabled: true
+  enabled: false
   db_path: "./data/vectors/documents"
   collection_name: "javis_documents"
   embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
@@ -76,7 +76,7 @@ logging:
 training:
   # 스케줄러 설정
   schedule:
-    enabled: true
+    enabled: false
     cron: "0 0 * * 0"  # 매주 일요일 자정
     timezone: "Asia/Seoul"
 
@@ -173,7 +173,7 @@ training:
 
 # Phase 6: 음성 인터페이스 설정
 voice:
-  enabled: true
+  enabled: false
   language: "ko-KR"
 
   # STT (Speech-to-Text) 설정

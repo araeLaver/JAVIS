@@ -95,10 +95,11 @@ def chat():
     config = get_config()
 
     # Check for API keys
-    if not config.runpod_api_key or not config.runpod_endpoint_id:
+    if not config.groq_api_key:
         print_error(
-            "RunPod credentials not configured.\n"
-            "Please set RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID in .env file."
+            "Groq API key not configured.\n"
+            "Please set GROQ_API_KEY in .env file.\n"
+            "Get a free key at: https://console.groq.com/keys"
         )
         console.print("\n[dim]Copy .env.example to .env and fill in your credentials.[/dim]")
         raise typer.Exit(1)
@@ -222,8 +223,7 @@ def config():
         f"[bold]App:[/bold] {cfg.app.name} v{cfg.app.version}\n"
         f"[bold]Model:[/bold] {cfg.model.base_model}\n"
         f"[bold]Provider:[/bold] {cfg.model.provider}\n"
-        f"[bold]Endpoint:[/bold] {'[green]Configured[/green]' if cfg.runpod_endpoint_id else '[red]Not set[/red]'}\n"
-        f"[bold]API Key:[/bold] {'[green]Configured[/green]' if cfg.runpod_api_key else '[red]Not set[/red]'}",
+        f"[bold]Groq API Key:[/bold] {'[green]Configured[/green]' if cfg.groq_api_key else '[red]Not set[/red]'}",
         title="Configuration",
     ))
 
