@@ -33,7 +33,7 @@ dependencies = [
 
     # AI/ML
     "sentence-transformers>=2.2.0",
-    "modal>=0.60.0",  # Modal.com serverless GPU
+    "modal>=1.4.1",  # Modal.com serverless GPU
 
     # Scheduling
     "apscheduler>=3.10.0",
