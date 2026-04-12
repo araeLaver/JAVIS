@@ -40,7 +40,7 @@ dependencies = [
 
     # Utilities
     "aiofiles>=23.0.0",
-    "tenacity>=8.2.0",
+    "tenacity>=9.1.4",
     "python-multipart>=0.0.6",
 
     # Cloud Storage
